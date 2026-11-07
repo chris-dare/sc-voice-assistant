@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Zigi Voice POC</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <main class="phone" aria-label="Zigi assistant">
+    <header class="topbar">
+      <div class="brand">
+        <span class="avatar" aria-hidden="true">Z</span>
+        <div>
+          <h1>Zigi</h1>
+          <p id="status-line" class="sub">Connecting…</p>
+        </div>
+      </div>
+      <div class="mode-toggle" role="tablist" aria-label="Mode">
+        <button role="tab" id="tab-chat" aria-selected="true" aria-controls="view-chat">Chat</button>
+        <button role="tab" id="tab-voice" aria-selected="false" aria-controls="view-voice">Voice</button>
+      </div>
+    </header>
+
+    <section id="view-chat" class="view" role="tabpanel" aria-labelledby="tab-chat">
+      <ol id="messages" class="messages" aria-live="polite"></ol>
+      <div id="note-hint" class="note-hint" hidden>Voice note transcribed. Check it, then send.</div>
+      <form id="composer" class="composer" autocomplete="off">
+        <button type="button" id="note-btn" class="icon-btn" aria-label="Record a voice note" title="Record a voice note">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-2.08A7 7 0 0 0 19 12h-2Z"/></svg>
+        </button>
+        <div id="recording" class="recording" hidden><span class="dot"></span><span id="rec-time">0:00</span> Recording… tap to stop</div>
+        <textarea id="input" rows="1" placeholder="Type a message" aria-label="Message"></textarea>
+        <button type="submit" id="send-btn" class="icon-btn primary" aria-label="Send">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.4 20.4 21 12 3.4 3.6 3.39 10.1 15 12 3.39 13.9z"/></svg>
+        </button>
+      </form>
+    </section>
+
+    <section id="view-voice" class="view" role="tabpanel" aria-labelledby="tab-voice" hidden>
+      <div class="voice-stage">
+        <div id="orb" class="orb" data-state="idle" aria-hidden="true"><div class="ring"></div><div class="core"></div></div>
+        <p id="voice-state" class="voice-state" aria-live="polite">Tap to start talking</p>
+        <p id="caption-user" class="caption user" aria-live="polite"></p>
+        <p id="caption-bot" class="caption bot" aria-live="polite"></p>
+      </div>
+      <div class="voice-controls">
+        <button id="voice-btn" class="voice-btn" aria-pressed="false">Start voice chat</button>
+        <button id="mute-btn" class="icon-btn" aria-pressed="false" aria-label="Mute microphone" title="Mute microphone" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-2.08A7 7 0 0 0 19 12h-2Z"/></svg>
+        </button>
+      </div>
+      <dl id="metrics" class="metrics" aria-label="Last turn timings"></dl>
+    </section>
+    <div id="toast" class="toast" role="status" hidden></div>
+  </main>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

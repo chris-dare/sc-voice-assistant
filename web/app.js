@@ -728,7 +728,21 @@ function wire() {
   });
 }
 
+// Size the app to the visible screen. iOS overlays the keyboard instead of resizing the page,
+// so follow the visual viewport and keep the composer above the keyboard.
+function fitViewport() {
+  const vv = window.visualViewport;
+  const h = vv ? vv.height : window.innerHeight;
+  document.documentElement.style.setProperty("--app-h", `${Math.round(h)}px`);
+  if (vv && vv.offsetTop > 0) window.scrollTo(0, 0);
+}
+
 (async function main() {
+  fitViewport();
+  window.visualViewport?.addEventListener("resize", fitViewport);
+  window.visualViewport?.addEventListener("scroll", fitViewport);
+  window.addEventListener("orientationchange", () => setTimeout(fitViewport, 300));
+  $("input").addEventListener("focus", () => setTimeout(() => { $("messages").scrollTop = $("messages").scrollHeight; }, 300));
   wire();
   try {
     await signIn();

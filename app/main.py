@@ -141,6 +141,7 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
             "posthog": {"token": s.posthog_project_token, "api_host": s.posthog_api_host} if s.posthog_project_token else None,
             "voice_modes": ["relay", "agent"] if s.agent_configured else ["relay"],
             "voice_mode_default": s.voice_mode_default if s.agent_configured else "relay",
+            "noise_gate": s.noise_gate,
         }
 
     # ------------------------------------------------------------------ text mode

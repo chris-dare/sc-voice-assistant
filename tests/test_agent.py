@@ -4,7 +4,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from app.agent import classify_waiting, is_affirmative, shape_input, spoken_digits, ungrounded_numbers
+from app.agent import classify_waiting, host_allowed, is_affirmative, links_in, page_text, shape_input, spoken_digits, ungrounded_numbers
 from app.main import create_app
 from app.sunco import Message
 
@@ -36,8 +36,10 @@ def test_spoken_digits(said, digits):
 
 def test_otp_is_reduced_to_digits_or_refused():
     assert shape_input("my OTP is four five one two nine", "otp", "") == ("45129", None)
-    sent, refusal = shape_input("I don't have it", "otp", "I don't have it")
+    sent, refusal = shape_input("it's one two", "otp", "it's one two")
     assert sent is None and "digit" in refusal
+    # No number at all: the user changed the subject, so it goes to Zigi as said.
+    assert shape_input("I don't have it", "otp", "I don't have it") == ("I don't have it", None)
 
 
 def test_phone_number_is_normalised():
@@ -57,6 +59,33 @@ def test_numbers_must_come_from_zigi_or_the_user():
     assert ungrounded_numbers("Dial *156# for 10GB.", sources) == ["*156#", "10"]
 
 
+def test_numbered_instructions_are_not_a_request():
+    """Seen 08 Nov: a SIM swap how-to ("3. Enter your phone number.") was taken as a request for one."""
+    howto = "To perform a SIM swap:\n1. Buy a blank SIM.\n2. Go to the site.\n3. Enter your phone number.\n4. Select SIM unavailable."
+    assert classify_waiting([msg(howto)]) == "none"
+    assert classify_waiting([msg("Please enter your phone number in the format 024XXXXXXX")]) == "phone_number"
+
+
+def test_page_text_prefers_main_content():
+    html = (
+        "<html><title>Dwenase | MTN</title><nav>Menu Personal Business</nav>"
+        "<main><h1>Dwenase</h1><p>Open Monday - Friday 08:00 - 17:00</p></main><script>x()</script></html>"
+    )
+    title, text = page_text(html)
+    assert title == "Dwenase | MTN" and "08:00" in text and "Menu" not in text and "x()" not in text
+
+
+def test_only_allowed_https_hosts():
+    assert host_allowed("https://mtn.com.gh/stores/", ["mtn.com.gh"])
+    assert host_allowed("https://shop.mtn.com.gh/x", ["mtn.com.gh"])
+    assert not host_allowed("http://mtn.com.gh/", ["mtn.com.gh"])
+    assert not host_allowed("https://evilmtn.com.gh/", ["mtn.com.gh"])
+    assert links_in("Visit [https://mtn.com.gh/stores/](https://mtn.com.gh/stores/).") == [
+        "https://mtn.com.gh/stores/",
+        "https://mtn.com.gh/stores/",
+    ]
+
+
 def test_waiting_labels():
     assert classify_waiting([msg("Please enter the OTP we sent to your number.")]) == "otp"
     assert classify_waiting([msg("Confirm purchase of 1GB for GH₵5? Reply YES or NO.")]) == "confirmation"
@@ -67,7 +96,7 @@ def test_waiting_labels():
 # ------------------------------------------------------------------ the agent-mode session
 @pytest.fixture
 def agent_client():
-    with TestClient(create_app(mock_settings(agent_quiet_s=0.2, agent_hold_line="One moment."))) as c:
+    with TestClient(create_app(mock_settings(agent_mode_enabled=True, agent_quiet_s=0.2, agent_hold_line="One moment."))) as c:
         yield c
 
 
@@ -102,6 +131,14 @@ def has_metrics(events):
 def test_config_offers_both_modes(agent_client):
     cfg = agent_client.get("/v1/config").json()
     assert cfg["voice_modes"] == ["relay", "agent"] and cfg["voice_mode_default"] == "relay"
+
+
+def test_agent_mode_is_off_without_the_flag(client):
+    """OPENROUTER_API_KEY is only a credential; AGENT_MODE_ENABLED turns the mode on."""
+    assert client.get("/v1/config").json()["voice_modes"] == ["relay"]
+    token = client.post("/v1/session", json={}).json()["token"]
+    with client.websocket_connect(f"/v1/voice/session?token={token}&mode=agent") as ws:
+        assert json.loads(ws.receive_text())["mode"] == "relay"
 
 
 def test_small_talk_is_answered_without_zigi(agent_client):

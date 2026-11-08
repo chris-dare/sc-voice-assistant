@@ -615,11 +615,24 @@ class VoiceClient {
       return;
     }
 
-    this.ws.send(pcm);
+    // Noise gate: until the local VAD hears speech, STT gets silence of the same length, so background
+    // noise and voices are never transcribed. The last ~240 ms of real audio is replayed when speech starts.
+    const gate = state.config.noise_gate !== false;
+    if (this.speaking || !gate) {
+      this.ws.send(pcm);
+    } else {
+      this.gateBuf = this.gateBuf || [];
+      this.gateBuf.push(pcm);
+      if (this.gateBuf.length > 12) this.gateBuf.shift();
+      this.ws.send(new ArrayBuffer(pcm.byteLength));
+    }
     setOrbLevel(this.state === "listening" ? rms * 12 : 0);
     if (!this.speaking) {
       this.above = rms > thr ? this.above + 1 : 0;
-      if (this.above >= 3) this.beginSpeech();
+      if (this.above >= 3) {
+        this.beginSpeech();
+        if (gate && this.gateBuf) { for (const p of this.gateBuf) this.ws.send(p); this.gateBuf = []; }
+      }
     } else {
       this.below = rms < thr * 0.7 ? this.below + 1 : 0;
       if (this.below >= 25) {

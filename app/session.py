@@ -33,6 +33,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
 import logfire
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -42,8 +43,11 @@ from .agent import (
     TOOLS,
     LLMError,
     ZigiState,
+    host_allowed,
     is_affirmative,
+    links_in,
     mask_digits,
+    read_page,
     shape_input,
     state_prompt,
     tool_result,
@@ -60,6 +64,8 @@ from .tts import TTSError
 log = logging.getLogger(__name__)
 
 _HAS_WORD = re.compile(r"[A-Za-z0-9]")
+# Transcripts made only of fillers or noise words are not a turn ("Uh, uh, uh").
+_FILLER = re.compile(r"^(?:\s|[.,!?…-])*(?:(?:uh|um+|uhm|hmm+|mm+|ah+|er+|eh|oh|huh|hm)(?:\s|[.,!?…-])*)+$", re.I)
 _PREROLL_BYTES = 16000  # 0.5 s of 16 kHz PCM16 kept before speech_start (batch mode)
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 _UNGROUNDED_NOTE = "Your reply contained numbers or codes that did not come from ZIGI. Do not answer MTN facts yourself: call ask_zigi."
@@ -110,7 +116,7 @@ class _State:
 class VoiceSession:
     def __init__(self, ws: WebSocket, svc: Services, ctx: UserContext, mode: str = "relay") -> None:
         self.ws = ws
-        self.mode = mode if mode == "agent" and svc.llm is not None else "relay"
+        self.mode = mode if mode == "agent" and svc.llm is not None and svc.settings.agent_configured else "relay"
         self.svc = svc
         self.cfg = svc.settings
         self.ctx = ctx
@@ -123,6 +129,7 @@ class VoiceSession:
         self.hold_task: asyncio.Task[None] | None = None
         self.seen = SeenSet()
         self.batch_buf = bytearray()
+        self.last_final_at = 0.0
         self.speech_end_at: float | None = None
         self._send_lock = asyncio.Lock()
         self._closed = False
@@ -247,6 +254,8 @@ class VoiceSession:
             self.state.last_activity = now
             hangover = float(data.get("hangover_ms") or 0) / 1000
             self.speech_end_at = now - hangover
+            if self.rt is not None:
+                asyncio.create_task(self._force_commit(self.speech_end_at))
             if self.rt is None and len(self.batch_buf) > _PREROLL_BYTES + 6400:
                 audio, self.batch_buf = bytes(self.batch_buf), bytearray()
                 asyncio.create_task(self._batch_transcribe(audio))
@@ -266,8 +275,19 @@ class VoiceSession:
         except STTError as exc:
             await self.send({"type": "error", "code": "stt_failed", "text": str(exc)})
             return
-        if _HAS_WORD.search(text):
+        if _HAS_WORD.search(text) and not _FILLER.match(text):
             await self._user_text(text, source="voice")
+
+    async def _force_commit(self, ended_at: float) -> None:
+        """Noise can keep STT's own VAD from ending the utterance: commit when the client says speech ended."""
+        await asyncio.sleep(self.cfg.stt_force_commit_s)
+        if self.rt is None or self.state.user_speaking or self.last_final_at >= ended_at:
+            return
+        if time.monotonic() - self.state.last_partial > 3.0:
+            return  # nothing pending: there is no utterance to commit
+        with contextlib.suppress(Exception):
+            await self.rt.commit()
+            log.info("forced an STT commit after end of speech")
 
     async def _stt_loop(self) -> None:
         while True:
@@ -278,7 +298,11 @@ class VoiceSession:
                     self.state.last_activity = self.state.last_partial
                     await self.send({"type": "transcript_partial", "text": ev.text})
                 elif ev.kind == "final":
-                    if _HAS_WORD.search(ev.text):
+                    self.last_final_at = time.monotonic()
+                    if _FILLER.match(ev.text):
+                        log.info("ignored a filler-only transcript")
+                        await self.send({"type": "transcript_partial", "text": ""})
+                    elif _HAS_WORD.search(ev.text):
                         await self._user_text(ev.text.strip(), source="voice")
                 elif ev.kind == "error":
                     log.warning("STT error: %s", ev.text)
@@ -559,10 +583,13 @@ class VoiceSession:
 
     async def _run_tool(self, turn: Turn, call: Any) -> str:
         waiting = self.zigi.waiting_for
+        if call.name == "read_link":
+            return await self._read_link(turn, str(call.arguments.get("url") or ""))
         with logfire.span("tool {name}", name=call.name, waiting_for=waiting, turn_id=turn.id) as span:
             content, refusal = self._tool_content(turn, call, waiting)
             if refusal:
                 span.set_attribute("refused", True)
+                self.grounding.append(refusal)
                 return json.dumps({"error": refusal})
             assert content is not None
             t0 = time.monotonic()
@@ -593,7 +620,28 @@ class VoiceSession:
             span.set_attribute("now_waiting_for", self.zigi.waiting_for)
             return tool_result(burst, self.zigi.waiting_for, timed_out=not burst)
 
+    async def _read_link(self, turn: Turn, url: str) -> str:
+        """read_link: only links Zigi sent in this call, and only on allowed hosts (AGENT_LINK_HOSTS)."""
+        url = url.strip().rstrip(".,;:")
+        with logfire.span("tool read_link", turn_id=turn.id, host=httpx.URL(url).host if url.startswith("http") else "") as span:
+            zigi_links = {u for t in self.grounding for u in links_in(t)}
+            if url not in zigi_links:
+                span.set_attribute("refused", "not_from_zigi")
+                return json.dumps({"error": "Only links that ZIGI sent in this call can be opened."})
+            if not host_allowed(url, self.cfg.agent_link_hosts):
+                span.set_attribute("refused", "host")
+                return json.dumps({"error": "That site can't be opened from here. Say what the link is for and that it's in the chat."})
+            t0 = time.monotonic()
+            result = await read_page(self.svc.http, url)
+            turn.zigi_ms += time.monotonic() - t0
+            span.set_attribute("ok", "error" not in result)
+            if "page_text" in result:
+                self.grounding.append(result["page_text"])
+            return json.dumps(result, ensure_ascii=False)
+
     def _tool_content(self, turn: Turn, call: Any, waiting: str) -> tuple[dict[str, Any] | None, str | None]:
+        if call.name == "read_link":
+            return None, None
         if call.name == "ask_zigi":
             text, refusal = shape_input(str(call.arguments.get("text") or ""), waiting, turn.text)
             if refusal or text is None:

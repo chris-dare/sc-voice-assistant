@@ -34,12 +34,14 @@ When the bot is slow, the gateway speaks a holding phrase after 2.5 s (`HOLD_PRO
 
 ## Voice modes: Chatbot relay and Agentic
 
-The voice screen has a switch (shown when `OPENROUTER_API_KEY` is set; the choice is kept on the device):
+The voice screen has a switch, shown when `AGENT_MODE_ENABLED=true` (the feature flag) and the LLM credential `OPENROUTER_API_KEY` is set. The choice is kept on the device.
 
 - **Chatbot relay** (`mode=relay`): every turn goes to Zigi as said, and Zigi's replies are spoken. Unchanged from before.
-- **Agentic** (`mode=agent`, design 5.8): an LLM (`AGENT_MODEL`, default `openai/gpt-6-luna` through OpenRouter) talks to the user and calls Zigi as a tool (`ask_zigi`, `choose_option`). It answers small talk itself, rewrites Zigi's replies for speech, and sends Zigi input in the exact form it expects (an OTP said in a sentence reaches Zigi as digits). Gateway code enforces the guardrails: spoken numbers must come from Zigi or the user, a yes is only forwarded when the user said yes, OTPs and phone numbers are normalised, and a slow or failed LLM turn falls back to chatbot relay. The agent's own replies are never posted to SunCo (they would reach Botpress).
+- **Agentic** (`mode=agent`, design 5.8): an LLM (`AGENT_MODEL`, default `openai/gpt-6-luna` through OpenRouter) talks to the user and calls Zigi as a tool (`ask_zigi`, `choose_option`). With `read_link` it opens links Zigi sent (only those, only on `AGENT_LINK_HOSTS`, default `mtn.com.gh`) and says what the page says instead of the URL. It answers small talk itself, rewrites Zigi's replies for speech, and sends Zigi input in the exact form it expects (an OTP said in a sentence reaches Zigi as digits). Gateway code enforces the guardrails: spoken numbers must come from Zigi or the user, a yes is only forwarded when the user said yes, OTPs and phone numbers are normalised, and a slow or failed LLM turn falls back to chatbot relay. The agent's own replies are never posted to SunCo (they would reach Botpress).
 
 Each turn's metrics carry `mode` and `route` (`relay`, `direct`, `zigi`, `fallback`, `push`), in Logfire and in PostHog `voice_turn`.
+
+Background noise: while nobody is speaking, the client sends silence to STT instead of mic audio (`NOISE_GATE`), the gateway commits the transcript 1 s after the client hears the end of speech if STT has not (`STT_FORCE_COMMIT_S`), and filler-only transcripts ("uh, uh") are ignored.
 
 ## Attachments and privacy
 

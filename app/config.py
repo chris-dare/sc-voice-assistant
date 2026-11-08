@@ -76,7 +76,11 @@ class Settings(BaseSettings):
         return "https://eu.i.posthog.com" if "eu" in self.posthog_region.lower() else "https://us.i.posthog.com"
 
     # --- Agent mode (design 5.8): an LLM in front of SunCo, Zigi as its tool --------------
+    # Feature flag for the Agentic mode. OPENROUTER_API_KEY is only the credential for the LLM.
+    agent_mode_enabled: bool = False
     openrouter_api_key: str = ""
+    # Zigi's links the agent may open and read (read_link), by host and its subdomains.
+    agent_link_hosts: list[str] = Field(default_factory=lambda: ["mtn.com.gh"])
     agent_base_url: str = "https://openrouter.ai/api/v1"
     agent_model: str = "openai/gpt-6-luna"
     agent_max_tokens: int = 300
@@ -85,10 +89,14 @@ class Settings(BaseSettings):
     agent_quiet_s: float = 1.2  # Zigi's reply burst is complete after this much silence
     agent_hold_line: str = "Let me check that for you."
     voice_mode_default: Literal["relay", "agent"] = "relay"
+    # Client sends silence instead of mic audio while its VAD hears no speech (background noise stays out of STT).
+    noise_gate: bool = True
+    # Commit the transcript this long after the client's end of speech if STT has not (noise can hold STT's VAD open).
+    stt_force_commit_s: float = 1.0
 
     @property
     def agent_configured(self) -> bool:
-        return bool(self.openrouter_api_key) or self.mock_providers
+        return self.agent_mode_enabled and (bool(self.openrouter_api_key) or self.mock_providers)
 
     # When set, /v1/session asks for this code (protects vendor credit on a public demo URL).
     demo_access_code: str = ""

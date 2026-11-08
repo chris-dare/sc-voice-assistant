@@ -56,6 +56,8 @@ class CallDeps:
     zigi_seen: set[str] = field(default_factory=set)
     # What the caller told us about themselves this call (e.g. where they are). Carried between turns.
     memory: dict[str, str] = field(default_factory=dict)
+    # Recent messages sent to Zigi ({"text", "at"} with wall-clock seconds), to refuse accidental repeats.
+    sends: list[dict[str, Any]] = field(default_factory=list)
 
     def is_preamble(self, text: str) -> bool:
         return any(p.search(text.strip()) for p in self.preamble)
@@ -79,6 +81,7 @@ async def _send_to_zigi(ctx: RunContext[CallDeps], content: dict[str, Any]) -> s
     except SunCoError:
         return json.dumps({"error": "ZIGI can't be reached right now. Tell the caller to try again shortly."})
     deps.used_zigi = True
+    deps.sends = [*deps.sends[-9:], {"text": str(content.get("text", "")), "at": time.time()}]
     deps.grounding.append(str(content.get("text", "")))
     await deps.emit({"type": "zigi_posted", "message": posted.to_dict()})
     burst = await _collect_burst(deps, posted)
@@ -224,6 +227,13 @@ class ZigiGuardrails(AbstractCapability[CallDeps]):
             text, refusal = shape_input(str(args.get("text") or ""), waiting, deps.user_said)
             if refusal or text is None:
                 self._refuse(deps, call.tool_name, refusal or "Nothing to send.")
+            if _sent_recently(deps, text or ""):
+                self._refuse(
+                    deps,
+                    call.tool_name,
+                    "You sent exactly this to ZIGI moments ago, and its reply is in ZIGI STATE and the conversation. "
+                    "Use that reply, or ask the caller what they need next. Don't send it again.",
+                )
             if waiting in {"otp", "phone_number"}:
                 logfire.info("agent sends {waiting} {masked}", waiting=waiting, masked=mask_digits(text or ""))
             return {**args, "text": text}
@@ -255,6 +265,17 @@ class ZigiGuardrails(AbstractCapability[CallDeps]):
         deps.grounding.append(reason)  # numbers in our own feedback may be repeated to the caller
         logfire.info("guardrail refused {tool}", tool=tool)
         raise ModelRetry(reason)
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+def _sent_recently(deps: CallDeps, text: str, window_s: float = 45.0) -> bool:
+    """The same message to Zigi twice within the window is a mistake (a caller repeating themselves while the agent
+    worked, or a turn retried), and with Zigi's strict flows it breaks things: a second OTP got "please clarify"."""
+    now, want = time.time(), _norm(text)
+    return bool(want) and any(_norm(str(s.get("text", ""))) == want and now - float(s.get("at", 0)) < window_s for s in deps.sends)
 
 
 # ------------------------------------------------------------------ history

@@ -200,3 +200,18 @@ def test_relay_mode_is_unchanged(agent_client):
         ev = run_turn(ws, "Hi, how are you?", has_metrics)
     assert sent_to_zigi(ev) == ["Hi, how are you?"] and said(ev) == ""
     assert next(e for e in ev if e["type"] == "metrics")["route"] == "relay"
+
+
+def test_speaking_again_while_zigi_works_never_sends_twice(agent_client):
+    """Seen 08 Nov: a question and an OTP reached Zigi twice when the caller spoke again mid-turn."""
+    token = agent_client.post("/v1/session", json={}).json()["token"]
+    with agent_client.websocket_connect(f"/v1/voice/session?token={token}&mode=agent") as ws:
+        ws.receive_text()
+        ws.send_text(json.dumps({"type": "text", "text": "How does roaming work?"}))
+        events = []
+        while not any(e["type"] == "user_message" for e in events):  # Zigi is now working on it
+            m = ws.receive()
+            if m.get("text"):
+                events.append(json.loads(m["text"]))
+        events += run_turn(ws, "How does roaming work?", lambda ev: sum(e["type"] == "metrics" for e in ev) >= 2 and has_metrics(ev))
+    assert sent_to_zigi(events).count("How does roaming work?") == 1

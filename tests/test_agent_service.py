@@ -48,3 +48,11 @@ def test_zigi_call_has_a_lead_in_and_returns_zigi_state():
         # A "yes" the caller didn't give is refused by the guardrail; nothing reaches Zigi.
         events = turn(c, "hmm let me think", history=done["history"], zigi_state=done["zigi_state"], grounding=done["grounding"])
         assert not [e for e in events if e["type"] == "zigi_posted" and e["message"]["content"]["text"].lower() == "yes"]
+
+
+def test_the_same_message_is_not_sent_to_zigi_twice():
+    with service() as c:
+        events = turn(c, "How does roaming work?")
+        done = events[-1]
+        again = turn(c, "How does roaming work?", history=done["history"], zigi_state=done["zigi_state"], sends=done["sends"])
+    assert [e for e in again if e["type"] == "zigi_posted"] == []

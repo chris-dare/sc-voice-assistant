@@ -104,6 +104,7 @@ async def _drive(
                     "grounding": deps.grounding[-80:],
                     "zigi_seen": sorted(deps.zigi_seen),
                     "memory": deps.memory,
+                    "sends": deps.sends,
                     "llm_first_ms": state["first"],
                     "zigi_ms": round(deps.zigi_ms * 1000),
                     "model": getattr(result.response, "model_name", None),

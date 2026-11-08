@@ -20,6 +20,8 @@ class AgentServiceError(Exception):
 class AgentClient(Protocol):
     def turn(self, request: dict[str, Any]) -> AsyncIterator[dict[str, Any]]: ...
 
+    async def warm(self) -> None: ...
+
     async def aclose(self) -> None: ...
 
 
@@ -41,6 +43,13 @@ class HTTPAgentClient:
         except httpx.HTTPError as exc:
             raise AgentServiceError(f"agent service unreachable: {type(exc).__name__}") from exc
 
+    async def warm(self) -> None:
+        """Wake the agent service (serverless cold start was 3 to 4 s on the first turn, seen 08 Nov)."""
+        try:
+            await self.http.get(self.url.removesuffix("/v1/turn") + "/healthz", timeout=10)
+        except httpx.HTTPError:
+            pass
+
     async def aclose(self) -> None:
         return None
 
@@ -60,6 +69,9 @@ class InProcessAgentClient:
 
         async for event in self.engine.turn(TurnRequest(**request)):
             yield event
+
+    async def warm(self) -> None:
+        return None
 
     async def aclose(self) -> None:
         await self.engine.aclose()

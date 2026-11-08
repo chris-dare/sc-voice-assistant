@@ -37,7 +37,9 @@ class AgentSettings(BaseSettings):
         default_factory=lambda: [r"my name is zigi", r"privacy policy", r"^(hello|hi)!?\s+how can i (assist|help) you( today)?\??$"]
     )
     # Pages the agent may read (web_fetch), exact host names
-    agent_link_hosts: list[str] = Field(default_factory=lambda: ["mtn.com.gh", "www.mtn.com.gh"])
+    agent_link_hosts: list[str] = Field(
+        default_factory=lambda: ["mtn.com.gh", "www.mtn.com.gh", "shop.mtn.com.gh", "mtncustomeronlinerequest.mtn.com.gh"]
+    )
     # Service auth: a bearer token; by default derived from the AUTH_SECRET the gateway also has.
     agent_service_token: str = ""
     auth_secret: str = ""

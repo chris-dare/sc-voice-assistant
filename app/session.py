@@ -72,6 +72,10 @@ class Turn:
     t_llm_first: float | None = None
     t_audio_first: float | None = None  # any audio, the hold line included
     zigi_ms: float = 0.0
+    t_tool_start: float | None = None  # agent: first Zigi or web call started
+    t_tool_end: float | None = None  # agent: last one finished
+    audio_marks: list[tuple[float, float]] = field(default_factory=list)  # agent: (sentence received, its audio started)
+    done: bool = False  # agent: the service finished the turn (route known)
     filler_spoken: bool = False
     spoken: list[str] = field(default_factory=list)
 
@@ -83,6 +87,7 @@ class SpeakItem:
     turn: Turn | None = None
     is_hold: bool = False  # relay hold prompt: skipped if the answer arrived first
     is_filler: bool = False  # agent hold line before a Zigi call
+    said_at: float = field(default_factory=time.monotonic)
 
 
 @dataclass
@@ -119,10 +124,12 @@ class VoiceSession:
         self.jobs: asyncio.Queue[tuple[str, Turn | None]] = asyncio.Queue()
         self.agent_task: asyncio.Task[None] | None = None
         self.push_buf: list[Message] = []
-        self.zigi_seen: set[str] = set()
-        self.memory: dict[
-            str, str
-        ] = {}  # what the caller told the agent about themselves (e.g. location)  # Zigi messages the agent has already handled
+        self.zigi_seen: set[str] = set()  # Zigi messages the agent has already handled
+        self.memory: dict[str, str] = {}  # what the caller told the agent about themselves (e.g. location)
+        self.sends: list[dict[str, Any]] = []  # recent messages the agent sent Zigi (the service refuses repeats)
+        self.agent_phase = "idle"  # idle | llm | zigi: what the running agent turn is doing
+        self.agent_turn: Turn | None = None  # the turn the agent is working on
+        self.followups: list[Turn] = []  # caller turns heard while Zigi was busy
         self.grounding: list[str] = []  # Zigi's and the caller's words this call: what numbers may come from
 
     # ------------------------------------------------------------------ plumbing
@@ -169,6 +176,8 @@ class VoiceSession:
                 tasks.append(asyncio.create_task(self._stt_loop(), name="stt"))
             if self.mode == "agent":
                 tasks.append(asyncio.create_task(self._agent_worker(), name="agent"))
+                if self.svc.agent is not None:
+                    asyncio.create_task(self.svc.agent.warm())
             try:
                 done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                 for t in done:
@@ -310,15 +319,31 @@ class VoiceSession:
         self.speech_end_at = None
         turn = Turn(id=uuid.uuid4().hex[:12], text=text, t_speech_end=speech_end, t_final=now)
         self.turn = turn
+        if self.mode == "agent":
+            await self._agent_user_turn(turn, source)
+            return
         await self._interrupt(silent=True)
         await self.send({"type": "transcript_final", "text": text, "source": source, "turn_id": turn.id})
         await self.set_state("thinking")
-        if self.mode == "agent":
-            turn.route, turn.relay = "direct", False
-            self.grounding.append(text)
-            self.jobs.put_nowait(("user", turn))
-            return
         await self._relay_post(turn, source)
+
+    async def _agent_user_turn(self, turn: Turn, source: str) -> None:
+        """Agentic mode: one turn at a time, so nothing reaches Zigi twice (seen 08 Nov: OTPs and questions sent twice
+        when the caller spoke again, or a pause split a sentence, while the agent was still working)."""
+        turn.route, turn.relay = "direct", False
+        busy = self.agent_task is not None and not self.agent_task.done()
+        await self._interrupt(silent=True, keep_agent=busy and self.agent_phase == "zigi")
+        await self.send({"type": "transcript_final", "text": turn.text, "source": source, "turn_id": turn.id})
+        await self.set_state("thinking")
+        if busy and self.agent_phase == "zigi":
+            # Zigi is already working on the last request: hear the answer first, then take this as the next turn.
+            self.followups.append(turn)
+            return
+        if busy and self.agent_turn is not None and self.agent_turn.text and not self.agent_turn.spoken:
+            # The agent was still thinking: this is more of the same utterance, so ask again with all of it.
+            turn.text = f"{self.agent_turn.text} {turn.text}"
+            turn.t_speech_end = turn.t_speech_end or self.agent_turn.t_speech_end
+        self.jobs.put_nowait(("user", turn))
 
     async def _relay_post(self, turn: Turn, source: str) -> None:
         try:
@@ -400,6 +425,14 @@ class VoiceSession:
             self.agent_task = asyncio.create_task(self._agent_job(kind, turn))
             await asyncio.wait({self.agent_task})
             self.agent_task = None
+            self.agent_phase = "idle"
+            if self.followups:
+                first, *rest = self.followups
+                self.followups = []
+                first.text = " ".join(t.text for t in [first, *rest])
+                self.turn = first
+                self.jobs.put_nowait(("user", first))
+                continue
             if self.queue.empty() and not (self.speaking and not self.speaking.done()) and self.jobs.empty():
                 await self.set_state("listening")
 
@@ -429,6 +462,7 @@ class VoiceSession:
         await self._agent_turn(push, "push")
 
     async def _agent_turn(self, turn: Turn, kind: str) -> None:
+        self.agent_turn, self.agent_phase = turn, "llm"
         request = {
             "conversation_id": self.ctx.conversation_id,
             "sunco_user_id": self.ctx.sunco_user_id,
@@ -438,6 +472,7 @@ class VoiceSession:
             "zigi_state": state_to_dict(self.zigi),
             "grounding": self.grounding[-80:],
             "memory": self.memory,
+            "sends": self.sends,
         }
         assert self.svc.agent is not None
         stream = self.svc.agent.turn(request)
@@ -477,6 +512,14 @@ class VoiceSession:
             await self.send({"type": "agent_text", "turn_id": turn.id, "text": text, "filler": filler})
             item_id = f"{'hold' if filler else 'agent'}-{turn.id}-{len(turn.spoken)}"
             self.queue.put_nowait(SpeakItem(item_id, speech, turn, is_filler=filler))
+        elif kind == "tool":
+            if event.get("name") in {"ask_zigi", "choose_option", "web_fetch"}:
+                if event.get("phase") == "start":
+                    self.agent_phase = "zigi"
+                    turn.t_tool_start = turn.t_tool_start or time.monotonic()
+                else:
+                    self.agent_phase = "llm"
+                    turn.t_tool_end = time.monotonic()
         elif kind == "zigi_posted":
             message = event["message"]
             self.seen.add(message["id"])
@@ -490,8 +533,10 @@ class VoiceSession:
             self.grounding = list(event.get("grounding") or [])[-80:]
             self.zigi_seen.update(event.get("zigi_seen") or [])
             self.memory = dict(event.get("memory") or self.memory)
+            self.sends = list(event.get("sends") or self.sends)
             turn.zigi_ms = (event.get("zigi_ms") or 0) / 1000
             turn.route = event.get("route") or turn.route
+            turn.done = True
             await self._report(turn)
 
     # ------------------------------------------------------------------ speaking
@@ -560,6 +605,14 @@ class VoiceSession:
                     if cut:
                         if item.turn and item.turn.t_audio_first is None:
                             item.turn.t_audio_first = time.monotonic()
+                        if (
+                            item.turn
+                            and not item.turn.relay
+                            and not item.is_hold
+                            and not any(m[0] == item.said_at for m in item.turn.audio_marks)
+                        ):
+                            item.turn.audio_marks.append((item.said_at, time.monotonic()))
+                            await self._report(item.turn)
                         if item.turn and item.turn.t_tts_first is None and not item.is_hold and not item.is_filler:
                             item.turn.t_tts_first = time.monotonic()
                             await self._report(item.turn)
@@ -569,10 +622,12 @@ class VoiceSession:
             for f in fetchers:
                 f.cancel()
 
-    async def _interrupt(self, silent: bool = False) -> None:
+    async def _interrupt(self, silent: bool = False, keep_agent: bool | None = None) -> None:
         while not self.queue.empty():
             self.queue.get_nowait()
-        if self.agent_task and not self.agent_task.done():
+        if keep_agent is None:
+            keep_agent = self.agent_phase == "zigi"  # a barge-in never abandons a request Zigi is working on
+        if self.agent_task and not self.agent_task.done() and not keep_agent:
             self.agent_task.cancel()
         if self.speaking and not self.speaking.done():
             self.speaking.cancel()
@@ -581,9 +636,12 @@ class VoiceSession:
             await self.set_state("listening")
 
     async def _report(self, turn: Turn) -> None:
-        if turn.reported or turn.t_tts_first is None:
+        if turn.reported:
             return
-        if turn.relay and (turn.t_posted is None or turn.t_bot_first is None):
+        if not turn.relay:
+            await self._report_agent(turn)
+            return
+        if turn.t_tts_first is None or turn.t_posted is None or turn.t_bot_first is None:
             return
         turn.reported = True
 
@@ -614,6 +672,41 @@ class VoiceSession:
             "gateway_ms": total - bot_ms,
             "total_ms": total,
             **extra,
+        }
+        telemetry.turn_metrics(metrics)
+        await self.send(metrics)
+
+    async def _report_agent(self, turn: Turn) -> None:
+        """Agentic turns are reported once the route is known and the answer is audible.
+
+        first_audio_ms: end of speech to the first sound (a lead-in counts). total_ms: to the answer itself, i.e. the
+        first sentence said after the last Zigi call (or the first sentence when there was none).
+        """
+        if not turn.done or not turn.audio_marks:
+            return
+        after = turn.t_tool_end or 0.0
+        answer = next((audio for said, audio in turn.audio_marks if said >= after), None)
+        if answer is None:
+            return
+        turn.reported = True
+
+        def ms(a: float | None, b: float | None) -> int | None:
+            return None if a is None or b is None else round((b - a) * 1000)
+
+        start = turn.t_speech_end if turn.t_speech_end is not None else turn.t_final
+        total = ms(start, answer) or 0
+        zigi = round(turn.zigi_ms * 1000)
+        metrics = {
+            "type": "metrics",
+            "turn_id": turn.id,
+            "mode": self.mode,
+            "route": turn.route,
+            "stt_ms": ms(turn.t_speech_end, turn.t_final),
+            "llm_ms": ms(turn.t_final, turn.t_llm_first),
+            "bot_ms": zigi,
+            "first_audio_ms": ms(start, min(a for _, a in turn.audio_marks)),
+            "gateway_ms": total - zigi,
+            "total_ms": total,
         }
         telemetry.turn_metrics(metrics)
         await self.send(metrics)

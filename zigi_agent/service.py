@@ -37,6 +37,7 @@ class TurnRequest(BaseModel):
     history: list[Any] = Field(default_factory=list)
     zigi_state: dict[str, Any] | None = None
     grounding: list[str] = Field(default_factory=list)
+    memory: dict[str, str] = Field(default_factory=dict)
 
 
 class AgentEngine:
@@ -75,6 +76,7 @@ class AgentEngine:
             user_said=req.text,
             zigi=state_from_dict(req.zigi_state),
             grounding=list(req.grounding[-80:]),
+            memory=dict(req.memory),
             skip=self.skip,
             preamble=self.preamble,
             emit=_noop,

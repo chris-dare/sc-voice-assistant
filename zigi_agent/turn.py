@@ -103,6 +103,7 @@ async def _drive(
                     "zigi_state": state_to_dict(deps.zigi),
                     "grounding": deps.grounding[-80:],
                     "zigi_seen": sorted(deps.zigi_seen),
+                    "memory": deps.memory,
                     "llm_first_ms": state["first"],
                     "zigi_ms": round(deps.zigi_ms * 1000),
                     "model": getattr(result.response, "model_name", None),

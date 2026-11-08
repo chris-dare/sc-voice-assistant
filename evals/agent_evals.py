@@ -61,13 +61,16 @@ async def run_call(call: Call) -> Heard:
     hist: list[Any] = []
     state: dict[str, Any] | None = None
     grounding: list[str] = []
+    memory: dict[str, str] = {}
     heard = Heard()
     for i, text in enumerate(call.utterances):
         last = i == len(call.utterances) - 1
         heard = Heard() if last else heard
         t0 = time.monotonic()
         async for ev in ENGINE.turn(
-            TurnRequest(conversation_id=conv, sunco_user_id="u", text=text, history=hist, zigi_state=state, grounding=grounding)
+            TurnRequest(
+                conversation_id=conv, sunco_user_id="u", text=text, history=hist, zigi_state=state, grounding=grounding, memory=memory
+            )
         ):
             if ev["type"] == "say":
                 if heard.first_ms is None:
@@ -76,7 +79,7 @@ async def run_call(call: Call) -> Heard:
             elif ev["type"] == "zigi_posted":
                 heard.sent.append(ev["message"]["content"].get("text", ""))
             elif ev["type"] == "done":
-                hist, state, grounding = ev["history"], ev["zigi_state"], ev["grounding"]
+                hist, state, grounding, memory = ev["history"], ev["zigi_state"], ev["grounding"], ev["memory"]
                 heard.route = ev["route"]
                 heard.grounding = grounding
             elif ev["type"] == "error":
@@ -158,6 +161,11 @@ dataset = Dataset[Call, Heard, Expect](
             name="repeat_without_zigi",
             inputs=Call(["How does roaming work?", "Sorry, can you say that again?"]),
             metadata=Expect(route="direct", sent=[], mentions=["abroad", "135", "roam"]),
+        ),
+        Case(
+            name="remembers_location_for_fibre",
+            inputs=Call(["Hey, I just moved to East Legon in Accra", "Is fibre available where I live?"]),
+            metadata=Expect(route="zigi", mentions=["available", "east legon"]),
         ),
         Case(name="purchase_asks_otp", inputs=Call([BUY]), metadata=Expect(route="zigi", mentions=["otp", "code"])),
         Case(

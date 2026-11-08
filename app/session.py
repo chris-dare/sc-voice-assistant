@@ -119,7 +119,10 @@ class VoiceSession:
         self.jobs: asyncio.Queue[tuple[str, Turn | None]] = asyncio.Queue()
         self.agent_task: asyncio.Task[None] | None = None
         self.push_buf: list[Message] = []
-        self.zigi_seen: set[str] = set()  # Zigi messages the agent has already handled
+        self.zigi_seen: set[str] = set()
+        self.memory: dict[
+            str, str
+        ] = {}  # what the caller told the agent about themselves (e.g. location)  # Zigi messages the agent has already handled
         self.grounding: list[str] = []  # Zigi's and the caller's words this call: what numbers may come from
 
     # ------------------------------------------------------------------ plumbing
@@ -434,6 +437,7 @@ class VoiceSession:
             "history": self.history,
             "zigi_state": state_to_dict(self.zigi),
             "grounding": self.grounding[-80:],
+            "memory": self.memory,
         }
         assert self.svc.agent is not None
         stream = self.svc.agent.turn(request)
@@ -485,6 +489,7 @@ class VoiceSession:
             self.zigi = state_from_dict(event.get("zigi_state"))
             self.grounding = list(event.get("grounding") or [])[-80:]
             self.zigi_seen.update(event.get("zigi_seen") or [])
+            self.memory = dict(event.get("memory") or self.memory)
             turn.zigi_ms = (event.get("zigi_ms") or 0) / 1000
             turn.route = event.get("route") or turn.route
             await self._report(turn)

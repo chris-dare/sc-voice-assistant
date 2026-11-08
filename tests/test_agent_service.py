@@ -7,7 +7,9 @@ from zigi_agent.service import create_app
 
 
 def service():
-    return TestClient(create_app(AgentSettings(_env_file=None, mock_providers=True, agent_service_token="t", zigi_poll_interval_s=0.05, zigi_quiet_s=0.2)))
+    return TestClient(
+        create_app(AgentSettings(_env_file=None, mock_providers=True, agent_service_token="t", zigi_poll_interval_s=0.05, zigi_quiet_s=0.2))
+    )
 
 
 def turn(client, text, **extra):
@@ -38,7 +40,9 @@ def test_zigi_call_has_a_lead_in_and_returns_zigi_state():
         assert [e["message"]["content"]["text"] for e in events if e["type"] == "zigi_posted"] == ["I want to buy a data bundle"]
         assert done["route"] == "zigi" and done["zigi_state"]["waiting_for"] == "otp"
         # Next turn carries the state back: the OTP said in a sentence reaches Zigi as digits.
-        events = turn(c, "my OTP is four five one two nine", history=done["history"], zigi_state=done["zigi_state"], grounding=done["grounding"])
+        events = turn(
+            c, "my OTP is four five one two nine", history=done["history"], zigi_state=done["zigi_state"], grounding=done["grounding"]
+        )
         assert [e["message"]["content"]["text"] for e in events if e["type"] == "zigi_posted"] == ["45129"]
         done = events[-1]
         # A "yes" the caller didn't give is refused by the guardrail; nothing reaches Zigi.

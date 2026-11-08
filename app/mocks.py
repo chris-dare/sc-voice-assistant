@@ -79,9 +79,20 @@ class MockSunCo:
                 self._flow[conv] = "otp"
                 self._msg(conv, "business", {"type": "text", "text": "Invalid OTP. Please enter only the digits of the OTP."})
             return
+        if flow == "fibre":
+            self._msg(
+                conv,
+                "business",
+                {"type": "text", "text": f"Good news! MTN Fibre Broadband is available in {text.strip()}. Plans start at GH₵299 a month."},
+            )
+            return
         if flow == "confirm":
             done = "Done! 1GB has been added to your account." if lowered in {"yes", "y"} else "Okay, I've cancelled that purchase."
             self._msg(conv, "business", {"type": "text", "text": done})
+            return
+        if re.search(r"\bfib(re|er)\b", lowered):
+            self._flow[conv] = "fibre"
+            self._msg(conv, "business", {"type": "text", "text": "Sure! Which area or town should I check fibre availability for?"})
             return
         if re.search(r"\b(i want to|i'd like to|please) buy\b|\bpurchase\b", lowered):
             self._flow[conv] = "otp"

@@ -1,6 +1,7 @@
 """Voice Gateway HTTP and WebSocket API."""
 
 import asyncio
+import hmac
 import contextlib
 import json
 import logging
@@ -47,15 +48,21 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        app.state.svc = services or build_services(settings)
+        get_svc(app)
         yield
         await app.state.svc.aclose()
 
     app = FastAPI(title="SC Voice Gateway", version="0.1.0", lifespan=lifespan)
     telemetry.setup(app, app.version, settings.environment, settings.log_level)
 
+    def get_svc(a: FastAPI) -> Services:
+        # Built lazily too, for platforms that skip the ASGI lifespan (serverless).
+        if getattr(a.state, "svc", None) is None:
+            a.state.svc = services or build_services(settings)
+        return a.state.svc
+
     def svc(request: Request) -> Services:
-        return request.app.state.svc
+        return get_svc(request.app)
 
     def bearer(authorization: str | None, token: str | None) -> str:
         if authorization and authorization.lower().startswith("bearer "):
@@ -84,18 +91,27 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
     # ------------------------------------------------------------------ session
     class SessionIn(BaseModel):
         user_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{8,64}$")
+        access_code: str | None = Field(default=None, max_length=200)
 
     @app.post("/v1/session")
     async def create_session(body: SessionIn, request: Request) -> dict[str, Any]:
         """POC sign-in: returns a signed token for a demo user (the mobile app will bring its own)."""
         s = svc(request)
+        code = s.settings.demo_access_code
+        if code and not hmac.compare_digest(code.encode(), (body.access_code or "").encode()):
+            raise HTTPException(403, "access code required")
         user_id = body.user_id or new_user_id()
         return {"token": issue_token(s.settings.auth_secret, user_id, s.settings.auth_token_ttl_s), "user_id": user_id}
 
     @app.get("/v1/config")
     async def client_config(request: Request) -> dict[str, Any]:
         s = svc(request).settings
-        return {"tts_sample_rate": s.tts_sample_rate, "stt_sample_rate": 16000, "mock": s.mock_providers}
+        return {
+            "tts_sample_rate": s.tts_sample_rate,
+            "stt_sample_rate": 16000,
+            "mock": s.mock_providers,
+            "access_code_required": bool(s.demo_access_code),
+        }
 
     # ------------------------------------------------------------------ text mode
     @app.get("/v1/conversations/me/messages")
@@ -200,7 +216,7 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
     # ------------------------------------------------------------------ voice mode
     @app.websocket("/v1/voice/session")
     async def voice(ws: WebSocket, token: str = "") -> None:
-        s: Services = ws.app.state.svc
+        s: Services = get_svc(ws.app)
         try:
             user_id = verify_token(s.settings.auth_secret, token)
         except AuthError:

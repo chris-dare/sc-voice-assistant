@@ -98,3 +98,16 @@ def test_voice_rejects_bad_token(client):
     with pytest.raises(WebSocketDisconnect) as exc, client.websocket_connect("/v1/voice/session?token=nope") as ws:
         ws.receive_text()
     assert exc.value.code == 4401
+
+
+def test_access_code_gate():
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+    from tests.conftest import mock_settings
+
+    with TestClient(create_app(mock_settings(demo_access_code="open-sesame"))) as c:
+        assert c.get("/v1/config").json()["access_code_required"] is True
+        assert c.post("/v1/session", json={}).status_code == 403
+        assert c.post("/v1/session", json={"access_code": "nope"}).status_code == 403
+        assert c.post("/v1/session", json={"access_code": "open-sesame"}).status_code == 200

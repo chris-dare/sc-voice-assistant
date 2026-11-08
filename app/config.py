@@ -63,6 +63,8 @@ class Settings(BaseSettings):
     mock_providers: bool = False
     log_level: str = "INFO"
     environment: str = "dev"
+    # When set, /v1/session asks for this code (protects vendor credit on a public demo URL).
+    demo_access_code: str = ""
 
     @property
     def sunco_configured(self) -> bool:

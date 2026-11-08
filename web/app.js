@@ -4,18 +4,24 @@ const state = { token: null, messages: new Map(), voice: null, audio: null, reco
 
 // ---------------------------------------------------------------- session
 async function signIn() {
-  let userId = null;
-  try { userId = localStorage.getItem("zigi_user_id"); } catch {}
-  const res = await fetch("/v1/session", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(userId ? { user_id: userId } : {}),
-  });
-  if (!res.ok) throw new Error(`sign-in failed (${res.status})`);
-  const data = await res.json();
-  try { localStorage.setItem("zigi_user_id", data.user_id); } catch {}
-  state.token = data.token;
   state.config = await (await fetch("/v1/config")).json();
+  let userId = null;
+  let code = "";
+  try { userId = localStorage.getItem("zigi_user_id"); code = localStorage.getItem("zigi_access_code") || ""; } catch {}
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (state.config.access_code_required && !code) {
+      code = (window.prompt("Enter the demo access code") || "").trim();
+    }
+    const body = { ...(userId ? { user_id: userId } : {}), ...(code ? { access_code: code } : {}) };
+    const res = await fetch("/v1/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    if (res.status === 403) { code = ""; continue; }
+    if (!res.ok) throw new Error(`sign-in failed (${res.status})`);
+    const data = await res.json();
+    try { localStorage.setItem("zigi_user_id", data.user_id); if (code) localStorage.setItem("zigi_access_code", code); } catch {}
+    state.token = data.token;
+    return;
+  }
+  throw new Error("access code rejected");
 }
 
 function api(path, opts = {}) {
@@ -236,20 +242,34 @@ class VoiceClient {
       if (e.data.type === "playing") { this.playing = true; setVoiceState("speaking"); }
     };
 
+    this.active = true;
+    this.retryDelay = 500;
+    await this.openSocket();
+  }
+
+  // Hosted on serverless functions, the socket closes at the function's time limit: reconnect quietly.
+  openSocket() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    this.ws = new WebSocket(`${proto}://${location.host}/v1/voice/session?token=${encodeURIComponent(state.token)}`);
-    this.ws.binaryType = "arraybuffer";
-    this.ws.onmessage = (e) => (typeof e.data === "string" ? this.onEvent(JSON.parse(e.data)) : this.onAudio(e.data));
-    this.ws.onclose = (e) => {
-      if (this.ws) { toast(e.code === 4401 ? "Session expired. Reload the page." : "Voice session ended."); stopVoice(); }
+    const ws = new WebSocket(`${proto}://${location.host}/v1/voice/session?token=${encodeURIComponent(state.token)}`);
+    ws.binaryType = "arraybuffer";
+    this.ws = ws;
+    ws.onmessage = (e) => (typeof e.data === "string" ? this.onEvent(JSON.parse(e.data)) : this.onAudio(e.data));
+    ws.onclose = (e) => {
+      if (!this.active || this.ws !== ws) return;
+      if (e.code === 4401) { toast("Session expired. Reload the page."); stopVoice(); return; }
+      setStatus("Voice · reconnecting…");
+      this.speaking = false;
+      setTimeout(() => this.active && this.openSocket().catch(() => {}), this.retryDelay);
+      this.retryDelay = Math.min(this.retryDelay * 2, 15000);
     };
-    await new Promise((resolve, reject) => {
-      this.ws.onopen = resolve;
+    return new Promise((resolve, reject) => {
+      ws.onopen = () => { this.retryDelay = 500; resolve(); };
       setTimeout(() => reject(new Error("voice connection timed out")), 8000);
     });
   }
 
   stop() {
+    this.active = false;
     const ws = this.ws;
     this.ws = null;
     try { ws && ws.close(); } catch {}
@@ -354,8 +374,8 @@ class VoiceClient {
         toast(ev.text || "Something went wrong.");
         break;
       case "session_end":
-        toast(ev.reason === "idle" ? "Voice chat paused after inactivity." : "Voice session ended.");
-        stopVoice();
+        if (ev.reason === "idle") { toast("Voice chat paused after inactivity."); stopVoice(); }
+        // max_duration: the socket closes next and onclose reconnects.
         break;
     }
   }

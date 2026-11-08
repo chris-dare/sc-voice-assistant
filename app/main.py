@@ -1,8 +1,8 @@
 """Voice Gateway HTTP and WebSocket API."""
 
 import asyncio
-import hmac
 import contextlib
+import hmac
 import json
 import logging
 import time

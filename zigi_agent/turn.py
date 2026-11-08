@@ -93,7 +93,7 @@ async def _drive(
                         raise
                     logfire.warn("agent draft had ungrounded numbers; asking Zigi instead")
                     extra = [*extra, _UNGROUNDED_NOTE]
-            route = "push" if kind == "push" else ("zigi" if deps.used_zigi else "direct")
+            route = "push" if kind == "push" else ("zigi" if deps.used_zigi else "cache" if deps.cache_hits else "direct")
             span.set_attribute("route", route)
             await emit(
                 {

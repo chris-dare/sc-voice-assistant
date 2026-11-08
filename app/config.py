@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     auth_secret: str = Field(default_factory=lambda: secrets.token_urlsafe(32))
     auth_token_ttl_s: int = 7 * 24 * 3600
     redis_url: str | None = None
+    # Usage limits per user (design 5.7). They protect vendor capacity (ElevenLabs, OpenRouter) from one client.
+    limits_enabled: bool = True
+    limit_per_minute: dict[str, int] = Field(
+        default_factory=lambda: {"session": 20, "messages": 30, "attachments": 10, "voice_notes": 10, "read_aloud": 30, "voice_turns": 30}
+    )
+    limit_concurrent_calls: int = 2  # a reconnecting call briefly holds two slots
+    limit_daily_voice_minutes: int = 60
+    call_state_ttl_s: int = 1800  # agentic call state kept this long after the last turn
     turn_quiet_window_s: float = 1.5
     # The dev bot can take 20 s or more on FAQ answers (measured 07 Nov 2026).
     bot_timeout_s: float = 45.0

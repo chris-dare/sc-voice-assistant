@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import re
@@ -43,6 +44,7 @@ from .bus import channel_for
 from .delivery import SeenSet
 from .services import Services, UserContext
 from .speech import render, split_sentences
+from .store import LimitExceeded
 from .stt import RealtimeSTT, STTError, pcm16_to_wav
 from .sunco import Message, SunCoError
 from .tts import TTSError
@@ -99,8 +101,9 @@ class _State:
 
 
 class VoiceSession:
-    def __init__(self, ws: WebSocket, svc: Services, ctx: UserContext, mode: str = "relay") -> None:
+    def __init__(self, ws: WebSocket, svc: Services, ctx: UserContext, mode: str = "relay", call_id: str = "") -> None:
         self.ws = ws
+        self.call_id = call_id or uuid.uuid4().hex
         self.mode = mode if mode == "agent" and svc.agent is not None and svc.settings.agent_configured else "relay"
         self.svc = svc
         self.cfg = svc.settings
@@ -153,6 +156,8 @@ class VoiceSession:
 
     # ------------------------------------------------------------------ lifecycle
     async def run(self) -> None:
+        if self.mode == "agent":
+            await self._load_call_state()
         if self.stt_mode == "realtime":
             await self._open_realtime()
         await self.send(
@@ -185,6 +190,9 @@ class VoiceSession:
                         log.exception("voice session task %s failed", t.get_name(), exc_info=t.exception())
             finally:
                 self._closed = True
+                if self.svc.limits is not None:
+                    with contextlib.suppress(Exception):
+                        await self.svc.limits.call_ended(self.ctx.user_id, self.call_id)
                 for t in tasks:
                     t.cancel()
                 if self.speaking:
@@ -331,6 +339,8 @@ class VoiceSession:
         """Agentic mode: one turn at a time, so nothing reaches Zigi twice (seen 08 Nov: OTPs and questions sent twice
         when the caller spoke again, or a pause split a sentence, while the agent was still working)."""
         turn.route, turn.relay = "direct", False
+        if not await self._turn_allowed():
+            return
         busy = self.agent_task is not None and not self.agent_task.done()
         await self._interrupt(silent=True, keep_agent=busy and self.agent_phase == "zigi")
         await self.send({"type": "transcript_final", "text": turn.text, "source": source, "turn_id": turn.id})
@@ -344,6 +354,48 @@ class VoiceSession:
             turn.text = f"{self.agent_turn.text} {turn.text}"
             turn.t_speech_end = turn.t_speech_end or self.agent_turn.t_speech_end
         self.jobs.put_nowait(("user", turn))
+
+    async def _turn_allowed(self) -> bool:
+        if self.svc.limits is None:
+            return True
+        try:
+            await self.svc.limits.hit(self.ctx.user_id, "voice_turns")
+        except LimitExceeded:
+            await self.send({"type": "notice", "code": "limit_voice_turns", "text": "That's a lot of turns in a minute. Give it a moment."})
+            await self.set_state("listening")
+            return False
+        return True
+
+    def _state_key(self) -> str:
+        return f"callstate:{self.ctx.conversation_id}"
+
+    async def _load_call_state(self) -> None:
+        """Pick up the agent's memory of this conversation (survives reconnects, e.g. Vercel's 300 s limit)."""
+        if self.svc.store is None:
+            return
+        with contextlib.suppress(Exception):
+            data = await self.svc.store.get_json(self._state_key())
+            if data:
+                self.history = data.get("history") or []
+                self.zigi = state_from_dict(data.get("zigi_state"))
+                self.grounding = list(data.get("grounding") or [])
+                self.memory = dict(data.get("memory") or {})
+                self.sends = list(data.get("sends") or [])
+                self.zigi_seen = set(data.get("zigi_seen") or [])
+
+    async def _save_call_state(self) -> None:
+        if self.svc.store is None:
+            return
+        state = {
+            "history": self.history,
+            "zigi_state": state_to_dict(self.zigi),
+            "grounding": self.grounding[-80:],
+            "memory": self.memory,
+            "sends": self.sends,
+            "zigi_seen": sorted(self.zigi_seen)[-200:],
+        }
+        with contextlib.suppress(Exception):
+            await self.svc.store.set_json(self._state_key(), state, self.cfg.call_state_ttl_s)
 
     async def _relay_post(self, turn: Turn, source: str) -> None:
         try:
@@ -534,6 +586,7 @@ class VoiceSession:
             self.zigi_seen.update(event.get("zigi_seen") or [])
             self.memory = dict(event.get("memory") or self.memory)
             self.sends = list(event.get("sends") or self.sends)
+            await self._save_call_state()
             turn.zigi_ms = (event.get("zigi_ms") or 0) / 1000
             turn.route = event.get("route") or turn.route
             turn.done = True
@@ -574,9 +627,26 @@ class VoiceSession:
         fetchers: list[asyncio.Task[None]] = []
 
         async def fetch(text: str, out: asyncio.Queue[bytes | Exception | None]) -> None:
+            # Short sentences repeat (lead-ins, holds, "anything else?"): cache their audio, skip the TTS round trip.
+            key = None
+            if len(text) <= 120:
+                norm = " ".join(text.lower().split())
+                key = "s:" + hashlib.sha256(f"{self.cfg.tts_voice_id}|{self.cfg.tts_model_voice}|{fmt}|{norm}".encode()).hexdigest()[:32]
             try:
+                hit = None
+                if key:
+                    with contextlib.suppress(Exception):  # a cache outage must not stop speech
+                        hit = await self.svc.cache.get(key)
+                if hit:
+                    out.put_nowait(hit[0])
+                    return
+                buf = bytearray()
                 async for chunk in self.svc.tts.stream(text, self.cfg.tts_model_voice, fmt):
                     out.put_nowait(chunk)
+                    buf += chunk
+                if key and buf:
+                    with contextlib.suppress(Exception):
+                        await self.svc.cache.put(key, bytes(buf), "audio/pcm")
             except TTSError as exc:
                 out.put_nowait(exc)
             finally:
@@ -712,10 +782,17 @@ class VoiceSession:
         await self.send(metrics)
 
     async def _watchdog(self) -> None:
-        started = time.monotonic()
+        started = last_beat = time.monotonic()
         while True:
             await asyncio.sleep(5)
             now = time.monotonic()
+            if self.svc.limits is not None and now - last_beat >= 30:
+                try:
+                    await self.svc.limits.heartbeat(self.ctx.user_id, self.call_id, now - last_beat)
+                except LimitExceeded:
+                    await self.send({"type": "session_end", "reason": "voice_minutes"})
+                    return
+                last_beat = now
             if now - started > self.cfg.session_max_s:
                 await self.send({"type": "session_end", "reason": "max_duration"})
                 return

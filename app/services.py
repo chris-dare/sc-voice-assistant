@@ -15,6 +15,7 @@ from .bus import Bus, MemoryBus, RedisBus
 from .config import Settings
 from .delivery import NoopWatcher, Poller, SeenSet
 from .mocks import MockSTT, MockSunCo, MockTTS
+from .store import Limits, Store, build_store
 from .stt import ElevenLabsSTT, STTProvider
 from .sunco import ConversationProvider, SunCoClient
 from .tts import ElevenLabsTTS, TTSCache, TTSProvider
@@ -40,6 +41,8 @@ class Services:
     cache: TTSCache
     http: httpx.AsyncClient
     agent: AgentClient | None = None
+    store: Store | None = None
+    limits: Limits | None = None
     webhook_seen: SeenSet = field(default_factory=SeenSet)
     skip_patterns: list[re.Pattern[str]] = field(default_factory=list)
     _users: dict[str, UserContext] = field(default_factory=dict)
@@ -52,9 +55,15 @@ class Services:
         async with lock:
             if ctx := self._users.get(user_id):
                 return ctx
-            sunco_user = await self.provider.ensure_user(external_id_for(user_id))
-            conv = await self.provider.ensure_conversation(sunco_user)
-            ctx = UserContext(user_id, sunco_user, conv)
+            # Shared across instances, so a new instance skips two SunCo lookups per user.
+            if self.store is not None and (cached := await self.store.get_json(f"user:{user_id}")):
+                ctx = UserContext(user_id, cached["sunco_user_id"], cached["conversation_id"])
+            else:
+                sunco_user = await self.provider.ensure_user(external_id_for(user_id))
+                conv = await self.provider.ensure_conversation(sunco_user)
+                ctx = UserContext(user_id, sunco_user, conv)
+                if self.store is not None:
+                    await self.store.set_json(f"user:{user_id}", {"sunco_user_id": sunco_user, "conversation_id": conv}, 7 * 86400)
             self._users[user_id] = ctx
             return ctx
 
@@ -63,6 +72,8 @@ class Services:
         return bool(stripped) and not any(p.search(stripped) for p in self.skip_patterns)
 
     async def aclose(self) -> None:
+        if self.store is not None:
+            await self.store.close()
         if self.agent is not None:
             await self.agent.aclose()
         await self.watcher.close()
@@ -110,14 +121,15 @@ def build_services(settings: Settings) -> Services:
             max_concurrent=settings.tts_max_concurrent,
         )
 
+    store = build_store(settings.redis_url)
+    bus: Bus = RedisBus(settings.redis_url) if settings.redis_url else MemoryBus()
     agent: AgentClient | None = None
     if settings.agent_configured:
         if settings.agent_service_url:
             agent = HTTPAgentClient(settings.agent_service_url, settings.agent_token, http)
         else:
-            agent = InProcessAgentClient(provider, mock=settings.mock_providers)
+            agent = InProcessAgentClient(provider, mock=settings.mock_providers, bus=bus)
 
-    bus: Bus = RedisBus(settings.redis_url) if settings.redis_url else MemoryBus()
     watcher: Poller | NoopWatcher
     if settings.sunco_delivery == "poll" or settings.mock_providers:
         watcher = Poller(provider, bus, settings.sunco_poll_interval_s)
@@ -133,5 +145,13 @@ def build_services(settings: Settings) -> Services:
         cache=TTSCache(settings.tts_cache_items, settings.tts_cache_ttl_s, settings.redis_url),
         http=http,
         agent=agent,
+        store=store,
+        limits=Limits(
+            store,
+            enabled=settings.limits_enabled,
+            per_minute=settings.limit_per_minute,
+            max_calls=settings.limit_concurrent_calls,
+            daily_voice_s=settings.limit_daily_voice_minutes * 60,
+        ),
         skip_patterns=[re.compile(p, re.IGNORECASE) for p in settings.speech_skip_patterns],
     )

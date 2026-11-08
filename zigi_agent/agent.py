@@ -13,10 +13,11 @@ Capabilities:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -30,8 +31,10 @@ from pydantic_ai.models.openrouter import OpenRouterModel, OpenRouterModelSettin
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai.tools import ToolDefinition
 
+from app.bus import Bus, channel_for
 from app.sunco import ConversationProvider, Message, SunCoError
 
+from .cache import SemanticCache, answer_cacheable, question_cacheable
 from .config import AgentSettings
 from .persona import PERSONA
 from .rules import ZigiState, is_affirmative, links_in, mask_digits, shape_input, state_prompt, tool_result
@@ -51,6 +54,9 @@ class CallDeps:
     skip: list[re.Pattern[str]]
     preamble: list[re.Pattern[str]]
     emit: Callable[[dict[str, Any]], Awaitable[None]]
+    bus: Bus | None = None
+    cache: SemanticCache | None = None
+    cache_hits: int = 0
     zigi_ms: float = 0.0
     used_zigi: bool = False
     zigi_seen: set[str] = field(default_factory=set)
@@ -71,20 +77,28 @@ class CallDeps:
 async def _send_to_zigi(ctx: RunContext[CallDeps], content: dict[str, Any]) -> str:
     deps = ctx.deps
     t0 = time.monotonic()
-    try:
-        posted = await deps.provider.post_content(
-            deps.conversation_id,
-            deps.sunco_user_id,
-            content,
-            {"channel": "voice", "source": "sc-voice-gateway", "input": "agent", "mode": "agent"},
-        )
-    except SunCoError:
-        return json.dumps({"error": "ZIGI can't be reached right now. Tell the caller to try again shortly."})
+    async with contextlib.AsyncExitStack() as stack:
+        sub = None
+        if deps.bus is not None:  # subscribe before posting, so no reply can slip past
+            sub = await stack.enter_async_context(deps.bus.subscribe(channel_for(deps.conversation_id)))
+        try:
+            posted = await deps.provider.post_content(
+                deps.conversation_id,
+                deps.sunco_user_id,
+                content,
+                {"channel": "voice", "source": "sc-voice-gateway", "input": "agent", "mode": "agent"},
+            )
+        except SunCoError:
+            return json.dumps({"error": "ZIGI can't be reached right now. Tell the caller to try again shortly."})
+        return await _after_post(deps, content, posted, t0, sub)
+
+
+async def _after_post(deps: CallDeps, content: dict[str, Any], posted: Message, t0: float, sub: Any) -> str:
     deps.used_zigi = True
     deps.sends = [*deps.sends[-9:], {"text": str(content.get("text", "")), "at": time.time()}]
     deps.grounding.append(str(content.get("text", "")))
     await deps.emit({"type": "zigi_posted", "message": posted.to_dict()})
-    burst = await _collect_burst(deps, posted)
+    burst = await _collect_burst(deps, posted, sub)
     deps.zigi_ms += time.monotonic() - t0
     if burst:
         deps.zigi.update(burst)
@@ -99,21 +113,38 @@ async def _send_to_zigi(ctx: RunContext[CallDeps], content: dict[str, Any]) -> s
     return json.dumps(result, ensure_ascii=False)
 
 
-async def _collect_burst(deps: CallDeps, posted: Message) -> list[Message]:
-    """Zigi's reply: new bot messages after ours, until a quiet gap after the first real one (or the timeout)."""
+async def _collect_burst(deps: CallDeps, posted: Message, sub: AsyncIterator[dict[str, Any]] | None = None) -> list[Message]:
+    """Zigi's reply: new bot messages after ours, until a quiet gap after the first real one (or the timeout).
+
+    With a bus subscription (REDIS_URL set; the gateway's webhook or poller publishes Zigi's messages) the agent just
+    listens, which takes SunCo polling off the hot path. If the bus stays silent for 8 s it falls back to polling.
+    """
     cfg = deps.settings
     seen = {posted.id}
     burst: list[Message] = []
-    deadline = time.monotonic() + cfg.zigi_timeout_s
-    last_new = 0.0
-    last_any = 0.0
+    start = time.monotonic()
+    deadline = start + cfg.zigi_timeout_s
+    last_new = last_any = 0.0
+    use_bus = sub is not None
     while time.monotonic() < deadline:
-        await asyncio.sleep(cfg.zigi_poll_interval_s)
-        try:
-            messages = await deps.provider.list_messages(deps.conversation_id)
-        except SunCoError:
-            continue
-        for m in messages:
+        candidates: list[Message] = []
+        if use_bus:
+            assert sub is not None
+            wait = cfg.zigi_quiet_s / 2 if last_any else max(0.1, min(deadline - time.monotonic(), 8.0))
+            try:
+                event = await asyncio.wait_for(anext(sub), wait)
+                if event.get("kind") == "bot_message":
+                    candidates = [Message.from_dict(event["message"])]
+            except (TimeoutError, StopAsyncIteration):
+                if not last_any and time.monotonic() - start >= 8.0:
+                    use_bus = False  # nothing published: the gateway may not be watching; poll instead
+        else:
+            await asyncio.sleep(cfg.zigi_poll_interval_s)
+            try:
+                candidates = await deps.provider.list_messages(deps.conversation_id)
+            except SunCoError:
+                continue
+        for m in candidates:
             if m.id in seen or m.author_type != "business" or m.received <= posted.received:
                 continue
             seen.add(m.id)
@@ -187,7 +218,30 @@ async def ask_zigi(ctx: RunContext[CallDeps], text: str) -> str:
         text: The message in the exact form ZIGI expects: a clear question, or only the OTP digits, phone number,
             amount, or Yes/No.
     """
-    return await _send_to_zigi(ctx, {"type": "text", "text": text[:2000]})
+    deps = ctx.deps
+    cacheable = deps.cache is not None and question_cacheable(text, deps.zigi.waiting_for)
+    vec = None
+    if cacheable:
+        assert deps.cache is not None
+        hit, vec = await deps.cache.lookup(text)
+        if hit is not None:
+            deps.cache_hits += 1
+            logfire.info("semantic cache hit {similarity}", similarity=round(hit.similarity, 3))
+            result = dict(hit.result)
+            for m in result.get("zigi_messages") or []:
+                deps.grounding.append(str(m.get("text", "")))
+            result["note"] = "From ZIGI's answer to the same question a little earlier; current."
+            return json.dumps(result, ensure_ascii=False)
+    out = await _send_to_zigi(ctx, {"type": "text", "text": text[:2000]})
+    if cacheable:
+        assert deps.cache is not None
+        try:
+            result = json.loads(out)
+        except ValueError:
+            result = {}
+        if answer_cacheable(result):
+            await deps.cache.store_answer(text, {k: v for k, v in result.items() if k != "note"}, vec)
+    return out
 
 
 @zigi_tools.tool

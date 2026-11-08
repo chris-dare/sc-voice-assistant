@@ -544,6 +544,8 @@ class VoiceClient {
     };
 
     this.active = true;
+    // One id for the whole call, kept across reconnects, so the gateway counts it as one call.
+    this.callId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2)).replace(/[^A-Za-z0-9_-]/g, "");
     this.retryDelay = 500;
     this.startedAt = performance.now();
     this.turns = 0;
@@ -555,13 +557,14 @@ class VoiceClient {
   openSocket() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     this.mode = state.voiceMode;
-    const ws = new WebSocket(`${proto}://${location.host}/v1/voice/session?token=${encodeURIComponent(state.token)}&mode=${this.mode}`);
+    const ws = new WebSocket(`${proto}://${location.host}/v1/voice/session?token=${encodeURIComponent(state.token)}&mode=${this.mode}&call=${this.callId}`);
     ws.binaryType = "arraybuffer";
     this.ws = ws;
     ws.onmessage = (e) => (typeof e.data === "string" ? this.onEvent(JSON.parse(e.data)) : this.onAudio(e.data));
     ws.onclose = (e) => {
       if (!this.active || this.ws !== ws) return;
       if (e.code === 4401) { toast("Session expired. Reload the page."); stopVoice("expired"); return; }
+      if (e.code === 4429) { stopVoice("limit"); return; }
       track("voice_reconnect", { code: e.code, after_s: Math.round((performance.now() - this.startedAt) / 1000) });
       setStatus("Voice · reconnecting…");
       this.speaking = false;
@@ -715,6 +718,7 @@ class VoiceClient {
         break;
       case "session_end":
         if (ev.reason === "idle") { toast("Voice chat paused after inactivity."); stopVoice("idle"); }
+        if (ev.reason === "voice_minutes") { toast("You've used today's voice minutes. You can keep chatting by text."); stopVoice("limit"); }
         // max_duration: the socket closes next and onclose reconnects.
         break;
     }

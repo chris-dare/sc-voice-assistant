@@ -107,4 +107,12 @@ The suite runs on mock providers, including an end-to-end voice turn over the We
 
 ## Webhook delivery (production)
 
-Polling is the default, so no public URL is needed. For webhooks, create a custom integration on the SunCo app with a `conversation:message` webhook pointing at `https://<host>/webhooks/sunco`. Then set `SUNCO_DELIVERY=webhook` and `SUNCO_WEBHOOK_SECRET` to the webhook's secret.
+Polling is the default, so no public URL is needed. For webhooks, create a custom integration on the SunCo app with a `conversation:message` webhook pointing at `https://<host>/webhooks/sunco` (`scripts/sunco_webhook.py <gateway-url>` prints the request; `--apply` creates it and prints the secret once). Then set `SUNCO_DELIVERY=webhook` and `SUNCO_WEBHOOK_SECRET` to the webhook's secret, and `REDIS_URL` on both services so every instance hears every webhook. The agent service listens on the same Redis channel and falls back to polling if it hears nothing for 8 s.
+
+## Scale and performance
+
+- **Shared store (`app/store.py`).** With `REDIS_URL` set, call state, the user lookup, rate limits, call slots, the TTS cache and the semantic cache are shared by every instance; without it they live in memory (one instance). Call state is kept per conversation, so a reconnect (Vercel ends WebSockets at 300 s) resumes the agent's memory and Zigi's state.
+- **Per-user limits.** Per-minute limits on each action, at most `LIMIT_CONCURRENT_CALLS` calls per user (slots renewed by a 30 s heartbeat, so a dropped call frees itself), and `LIMIT_DAILY_VOICE_MINUTES` of voice a day. Over a limit: HTTP 429 with `Retry-After`, or WebSocket close 4429.
+- **Semantic cache (`zigi_agent/cache.py`).** A general question close in meaning (cosine ≥ 0.9 on 256-dimension embeddings) to one Zigi answered in the last 6 h is answered from that answer, without the 5 to 17 s Zigi round trip. Never while Zigi waits for input, never personal, account or transactional questions, never answers that ask for input or greet by name. Logged as `semantic cache hit` with `route: cache`.
+- **TTS sentence cache.** Sentences up to 120 characters (lead-ins, holds, common replies) are cached as PCM by voice, model and text.
+- **Load test.** `uv run python scripts/loadtest.py --calls 10 50 100 200 [--mode agent]` starts a gateway on fakes with vendor delays (Zigi 3 s, TTS 0.25 s) and drives concurrent typed voice calls.

@@ -13,14 +13,18 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 
+import httpx
 import logfire
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.bus import Bus, RedisBus
+from app.store import build_store
 from app.sunco import ConversationProvider, SunCoClient
 
 from .agent import CallDeps, build_agent
+from .cache import Embedder, SemanticCache
 from .config import AgentSettings, get_settings
 from .mock_model import mock_model
 from .rules import state_from_dict
@@ -44,7 +48,7 @@ class TurnRequest(BaseModel):
 class AgentEngine:
     """The agent plus what its tools need. One per process."""
 
-    def __init__(self, settings: AgentSettings, provider: ConversationProvider | None = None) -> None:
+    def __init__(self, settings: AgentSettings, provider: ConversationProvider | None = None, bus: Bus | None = None) -> None:
         self.settings = settings
         self._own_provider = provider is None
         if provider is None:
@@ -64,6 +68,20 @@ class AgentEngine:
         self.agent = build_agent(settings, mock_model() if settings.mock_providers else None)
         self.skip = [re.compile(p, re.IGNORECASE) for p in settings.speech_skip_patterns]
         self.preamble = [re.compile(p, re.IGNORECASE) for p in settings.zigi_preamble_patterns]
+        self.bus = bus if bus is not None else (RedisBus(settings.redis_url) if settings.redis_url else None)
+        self._own_bus = bus is None and self.bus is not None
+        self.store = build_store(settings.redis_url)
+        self.http = httpx.AsyncClient()
+        self.cache: SemanticCache | None = None
+        if settings.semantic_cache_enabled:
+            embedder = (
+                None
+                if settings.mock_providers or not settings.openrouter_api_key
+                else Embedder(settings.openrouter_api_key, settings.embedding_model, self.http)
+            )
+            self.cache = SemanticCache(
+                self.store, embedder, ttl_s=settings.semantic_cache_ttl_s, threshold=settings.semantic_cache_threshold
+            )
 
     async def turn(self, req: TurnRequest) -> AsyncIterator[dict[str, Any]]:
         async def _noop(_: dict[str, Any]) -> None:
@@ -81,6 +99,8 @@ class AgentEngine:
             sends=list(req.sends[-10:]),
             skip=self.skip,
             preamble=self.preamble,
+            bus=self.bus,
+            cache=self.cache,
             emit=_noop,
         )
         async for event in run_turn(self.agent, deps, kind=req.kind, text=req.text, history=req.history):
@@ -89,6 +109,10 @@ class AgentEngine:
     async def aclose(self) -> None:
         if self._own_provider:
             await self.provider.aclose()
+        if self._own_bus and self.bus is not None:
+            await self.bus.close()
+        await self.store.close()
+        await self.http.aclose()
 
 
 def create_app(settings: AgentSettings | None = None) -> FastAPI:

@@ -43,6 +43,13 @@ class AgentSettings(BaseSettings):
     # Service auth: a bearer token; by default derived from the AUTH_SECRET the gateway also has.
     agent_service_token: str = ""
     auth_secret: str = ""
+    # Shared with the gateway: Zigi's messages arrive on its bus, so the agent need not poll SunCo.
+    redis_url: str | None = None
+    # Semantic cache for Zigi's general FAQ answers (zigi_agent/cache.py)
+    semantic_cache_enabled: bool = True
+    semantic_cache_ttl_s: int = 6 * 3600
+    semantic_cache_threshold: float = 0.9
+    embedding_model: str = "openai/text-embedding-3-small"
     mock_providers: bool = False
     environment: str = "dev"
 

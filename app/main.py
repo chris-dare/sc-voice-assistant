@@ -5,7 +5,9 @@ import contextlib
 import hmac
 import json
 import logging
+import re
 import time
+import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Annotated, Any
@@ -35,6 +37,7 @@ from .delivery import handle_webhook, webhook_secret_ok
 from .services import Services, UserContext, build_services
 from .session import VoiceSession
 from .speech import render
+from .store import LimitExceeded
 from .stt import STTError
 from .sunco import SunCoError, media_urls
 from .tts import TTSError, content_type_for
@@ -114,6 +117,20 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
 
     User = Annotated[UserContext, Depends(current_user)]
 
+    @app.exception_handler(LimitExceeded)
+    async def limit_exceeded(request: Request, exc: LimitExceeded) -> JSONResponse:
+        return JSONResponse(
+            {"type": "about:blank", "title": "Too many requests", "status": 429, "detail": f"limit reached: {exc.what}"},
+            status_code=429,
+            headers={"Retry-After": str(exc.retry_after_s)},
+            media_type="application/problem+json",
+        )
+
+    async def enforce_limit(request: Request, user: UserContext, action: str) -> None:
+        s = svc(request)
+        if s.limits is not None:
+            await s.limits.hit(user.user_id, action)
+
     # ------------------------------------------------------------------ session
     class SessionIn(BaseModel):
         user_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{8,64}$")
@@ -123,6 +140,8 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
     async def create_session(body: SessionIn, request: Request) -> dict[str, Any]:
         """POC sign-in: returns a signed token for a demo user (the mobile app will bring its own)."""
         s = svc(request)
+        if s.limits is not None:
+            await s.limits.hit(f"ip:{request.client.host if request.client else 'unknown'}", "session")
         code = s.settings.demo_access_code
         if code and not hmac.compare_digest(code.encode(), (body.access_code or "").encode()):
             raise HTTPException(403, "access code required")
@@ -193,6 +212,7 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
 
     @app.post("/v1/messages")
     async def send_text(body: TextIn, user: User, request: Request) -> dict[str, Any]:
+        await enforce_limit(request, user, "messages")
         s = svc(request)
         try:
             msg = await s.provider.post_text(
@@ -213,6 +233,7 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
         text: Annotated[str | None, Form(max_length=2000)] = None,
     ) -> dict[str, Any]:
         """Upload a photo or file to SunCo and post it as an image or file message from the user."""
+        await enforce_limit(request, user, "attachments")
         s = svc(request)
         limit = s.settings.attachment_max_bytes
         data = await file.read(limit + 1)
@@ -270,6 +291,7 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
     @app.post("/v1/voice-notes")
     async def voice_note(user: User, request: Request, file: Annotated[UploadFile, File()]) -> dict[str, Any]:
         """Flow 2: transcribe a voice note. The client shows the text for review before sending."""
+        await enforce_limit(request, user, "voice_notes")
         s = svc(request)
         audio = await file.read(MAX_VOICE_NOTE_BYTES + 1)
         if len(audio) > MAX_VOICE_NOTE_BYTES:
@@ -286,6 +308,7 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
     @app.get("/v1/messages/{message_id}/audio")
     async def read_aloud(message_id: str, user: User, request: Request) -> StreamingResponse:
         """Flow 3: read a bot message aloud. The message must be in the caller's conversation."""
+        await enforce_limit(request, user, "read_aloud")
         s = svc(request)
         cfg = s.settings
         key = f"{cfg.tts_voice_id}:{cfg.tts_model_readaloud}:{cfg.tts_readaloud_format}:{message_id}"
@@ -319,7 +342,7 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
 
     # ------------------------------------------------------------------ voice mode
     @app.websocket("/v1/voice/session")
-    async def voice(ws: WebSocket, token: str = "", mode: str = "") -> None:
+    async def voice(ws: WebSocket, token: str = "", mode: str = "", call: str = "") -> None:
         s: Services = get_svc(ws.app)
         try:
             user_id = verify_token(s.settings.auth_secret, token)
@@ -333,7 +356,16 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
             await ws.send_text(json.dumps({"type": "error", "code": "unavailable", "text": "Conversation service unavailable."}))
             await ws.close(code=1011)
             return
-        session = VoiceSession(ws, s, ctx, mode or s.settings.voice_mode_default)
+        call_id = call if re.fullmatch(r"[A-Za-z0-9_-]{8,64}", call) else uuid.uuid4().hex
+        if s.limits is not None:
+            try:
+                await s.limits.call_started(user_id, call_id)
+            except LimitExceeded as exc:
+                text = "You've used today's voice minutes." if exc.what == "voice_minutes" else "You already have a voice call open."
+                await ws.send_text(json.dumps({"type": "error", "code": f"limit_{exc.what}", "text": text}))
+                await ws.close(code=4429)
+                return
+        session = VoiceSession(ws, s, ctx, mode or s.settings.voice_mode_default, call_id=call_id)
         with logfire.span("voice session {conversation_id}", conversation_id=ctx.conversation_id, mode=session.mode):
             await session.run()
         with contextlib.suppress(Exception):

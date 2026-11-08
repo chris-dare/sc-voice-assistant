@@ -275,7 +275,6 @@ class VoiceSession:
         turn.t_posted = time.monotonic()
         self.seen.add(posted.id)
         await self.send({"type": "user_message", "message": posted.to_dict()})
-        asyncio.create_task(self.svc.provider.typing(self.ctx.conversation_id, self.ctx.sunco_user_id, True))
         if self.hold_task:
             self.hold_task.cancel()
         self.hold_task = asyncio.create_task(self._hold(turn))
@@ -303,7 +302,6 @@ class VoiceSession:
             turn = self.turn
             if turn and turn.t_bot_any is None:
                 turn.t_bot_any = time.monotonic()
-                asyncio.create_task(self.svc.provider.typing(self.ctx.conversation_id, self.ctx.sunco_user_id, False))
             speech = render(msg.content)
             spoken = self.svc.speakable(msg.text) and bool(speech)
             await self.send({"type": "bot_message", "message": msg.to_dict(), "speech": speech if spoken else ""})

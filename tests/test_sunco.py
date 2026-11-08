@@ -96,3 +96,27 @@ async def test_get_message_searches_conversation():
     with pytest.raises(SunCoError) as exc:
         await client().get_message("c1", "other")
     assert exc.value.status == 404
+
+
+@respx.mock
+async def test_ensure_user_looks_up_before_creating():
+    lookup = respx.get(f"{BASE}/users/ext-2").mock(
+        side_effect=[httpx.Response(404, json={"errors": []}), httpx.Response(200, json={"user": {"id": "u2"}})]
+    )
+    create = respx.post(f"{BASE}/users").mock(return_value=httpx.Response(201, json={"user": {"id": "u2"}}))
+    assert await client().ensure_user("ext-2") == "u2"  # new user: lookup 404, then create
+    assert await client().ensure_user("ext-2") == "u2"  # returning user: lookup only
+    assert lookup.call_count == 2 and create.call_count == 1
+
+
+@respx.mock
+async def test_tts_retries_on_rate_limit():
+    from app.tts import ElevenLabsTTS
+
+    route = respx.post("https://el.test/v1/text-to-speech/v1/stream").mock(
+        side_effect=[httpx.Response(429, json={"detail": "busy"}), httpx.Response(200, content=b"\x01\x02audio")]
+    )
+    async with httpx.AsyncClient() as http:
+        tts = ElevenLabsTTS("k", "https://el.test", "v1", http)
+        audio = b"".join([c async for c in tts.stream("hi", "m", "pcm_24000")])
+    assert audio == b"\x01\x02audio" and route.call_count == 2

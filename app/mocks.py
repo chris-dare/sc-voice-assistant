@@ -90,9 +90,6 @@ class MockSunCo:
 
         raise SunCoError("not found", 404)
 
-    async def typing(self, conversation_id: str, user_id: str, start: bool) -> None:
-        return None
-
     async def aclose(self) -> None:
         return None
 

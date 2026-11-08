@@ -80,7 +80,6 @@ class ConversationProvider(Protocol):
     async def post_text(self, conversation_id: str, user_id: str, text: str, metadata: dict[str, Any] | None = None) -> Message: ...
     async def list_messages(self, conversation_id: str) -> list[Message]: ...
     async def get_message(self, conversation_id: str, message_id: str) -> Message: ...
-    async def typing(self, conversation_id: str, user_id: str, start: bool) -> None: ...
     async def aclose(self) -> None: ...
 
 
@@ -123,9 +122,12 @@ class SunCoClient:
         raise AssertionError("unreachable")
 
     async def ensure_user(self, external_id: str) -> str:
-        resp = await self._request("POST", "/users", json={"externalId": external_id}, ok=(200, 201, 409))
-        if resp.status_code == 409:
-            resp = await self._request("GET", f"/users/{external_id}")
+        # Look up first: returning users are the common case, and a 409 on create is logged as an error.
+        resp = await self._request("GET", f"/users/{external_id}", ok=(200, 404))
+        if resp.status_code == 404:
+            resp = await self._request("POST", "/users", json={"externalId": external_id}, ok=(200, 201, 409))
+            if resp.status_code == 409:  # created concurrently
+                resp = await self._request("GET", f"/users/{external_id}")
         return resp.json()["user"]["id"]
 
     async def ensure_conversation(self, user_id: str) -> str:
@@ -161,13 +163,3 @@ class SunCoClient:
             if msg.id == message_id:
                 return msg
         raise SunCoError(f"message {message_id} not found in conversation", 404)
-
-    async def typing(self, conversation_id: str, user_id: str, start: bool) -> None:
-        try:
-            await self._request(
-                "POST",
-                f"/conversations/{conversation_id}/activity",
-                json={"author": {"type": "user", "userId": user_id}, "type": "typing:start" if start else "typing:stop"},
-            )
-        except SunCoError as exc:  # typing is cosmetic; never fail a turn on it
-            log.debug("typing activity failed: %s", exc)

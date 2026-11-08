@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections import OrderedDict
@@ -22,31 +23,49 @@ class TTSProvider(Protocol):
 
 
 class ElevenLabsTTS:
-    def __init__(self, api_key: str, base_url: str, voice_id: str, http: httpx.AsyncClient) -> None:
+    def __init__(
+        self, api_key: str, base_url: str, voice_id: str, http: httpx.AsyncClient, max_concurrent: int = 2, retries: int = 3
+    ) -> None:
         self._key = api_key
         self._base = base_url.rstrip("/")
         self._voice = voice_id
         self._http = http
+        # The ElevenLabs plan caps concurrent requests (3 today); stay under it per instance.
+        self._slots = asyncio.Semaphore(max_concurrent)
+        self._retries = retries
 
     async def stream(self, text: str, model_id: str, output_format: str) -> AsyncIterator[bytes]:
         url = f"{self._base}/v1/text-to-speech/{self._voice}/stream"
-        try:
-            async with self._http.stream(
-                "POST",
-                url,
-                params={"output_format": output_format},
-                headers={"xi-api-key": self._key},
-                json={"text": text, "model_id": model_id},
-                timeout=httpx.Timeout(30, connect=5),
-            ) as resp:
-                if resp.status_code != 200:
-                    body = (await resp.aread())[:300]
-                    raise TTSError(f"TTS {resp.status_code}: {body!r}")
-                async for chunk in resp.aiter_bytes():
-                    if chunk:
-                        yield chunk
-        except httpx.HTTPError as exc:
-            raise TTSError(f"TTS request failed: {exc}") from exc
+        delay = 0.3
+        for attempt in range(self._retries + 1):
+            async with self._slots:
+                try:
+                    async with self._http.stream(
+                        "POST",
+                        url,
+                        params={"output_format": output_format},
+                        headers={"xi-api-key": self._key},
+                        json={"text": text, "model_id": model_id},
+                        timeout=httpx.Timeout(30, connect=5),
+                    ) as resp:
+                        if resp.status_code == 429 and attempt < self._retries:
+                            await resp.aread()
+                            retry = True
+                        elif resp.status_code != 200:
+                            body = (await resp.aread())[:300]
+                            raise TTSError(f"TTS {resp.status_code}: {body!r}")
+                        else:
+                            retry = False
+                            async for chunk in resp.aiter_bytes():
+                                if chunk:
+                                    yield chunk
+                except httpx.HTTPError as exc:
+                    raise TTSError(f"TTS request failed: {exc}") from exc
+            if not retry:
+                return
+            log.info("TTS rate-limited (429), retry %d in %.1fs", attempt + 1, delay)
+            await asyncio.sleep(delay)
+            delay *= 2
 
 
 class TTSCache:

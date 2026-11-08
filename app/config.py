@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     tts_sample_rate: int = 24000  # PCM for voice mode
     tts_readaloud_format: str = "mp3_44100_128"
     tts_max_chars: int = 2000
+    tts_max_concurrent: int = 2  # per instance; ElevenLabs plan allows 3 in total
 
     # --- Gateway ---------------------------------------------------------------------
     auth_secret: str = Field(default_factory=lambda: secrets.token_urlsafe(32))

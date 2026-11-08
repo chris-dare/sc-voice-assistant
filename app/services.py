@@ -98,7 +98,13 @@ def build_services(settings: Settings) -> Services:
             settings.stt_keyterms,
             http,
         )
-        tts = ElevenLabsTTS(settings.elevenlabs_api_key, settings.elevenlabs_base_url, settings.tts_voice_id, http)
+        tts = ElevenLabsTTS(
+            settings.elevenlabs_api_key,
+            settings.elevenlabs_base_url,
+            settings.tts_voice_id,
+            http,
+            max_concurrent=settings.tts_max_concurrent,
+        )
 
     bus: Bus = RedisBus(settings.redis_url) if settings.redis_url else MemoryBus()
     watcher: Poller | NoopWatcher

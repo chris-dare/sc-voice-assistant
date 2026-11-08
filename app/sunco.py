@@ -74,12 +74,44 @@ class Message:
         )
 
 
+@dataclass(slots=True)
+class MediaTarget:
+    """Where to get an attachment's bytes: a short-lived signed URL, or the bytes themselves."""
+
+    redirect: str | None = None
+    data: bytes | None = None
+    content_type: str = "application/octet-stream"
+
+
+def media_urls(content: dict[str, Any]) -> set[str]:
+    """Every attachment URL a message refers to (image/file messages and carousel items)."""
+    urls = {content["mediaUrl"]} if content.get("mediaUrl") else set()
+    for item in content.get("items") or []:
+        if item.get("mediaUrl"):
+            urls.add(item["mediaUrl"])
+    return urls
+
+
+def is_sunco_media_host(url: str) -> bool:
+    """Only send the app key to Zendesk / Sunshine Conversations hosts, never to an arbitrary URL."""
+    from urllib.parse import urlparse
+
+    u = urlparse(url)
+    host = (u.hostname or "").lower()
+    return u.scheme == "https" and (host.endswith(".zendesk.com") or host.endswith(".smooch.io") or host == "smooch.io")
+
+
 class ConversationProvider(Protocol):
     async def ensure_user(self, external_id: str) -> str: ...
     async def ensure_conversation(self, user_id: str) -> str: ...
     async def post_text(self, conversation_id: str, user_id: str, text: str, metadata: dict[str, Any] | None = None) -> Message: ...
     async def list_messages(self, conversation_id: str) -> list[Message]: ...
     async def get_message(self, conversation_id: str, message_id: str) -> Message: ...
+    async def upload_attachment(self, conversation_id: str, filename: str, data: bytes, content_type: str) -> dict[str, Any]: ...
+    async def post_content(
+        self, conversation_id: str, user_id: str, content: dict[str, Any], metadata: dict[str, Any] | None = None
+    ) -> Message: ...
+    async def resolve_media(self, media_url: str) -> MediaTarget: ...
     async def aclose(self) -> None: ...
 
 
@@ -144,10 +176,12 @@ class SunCoClient:
         return resp.json()["conversation"]["id"]
 
     async def post_text(self, conversation_id: str, user_id: str, text: str, metadata: dict[str, Any] | None = None) -> Message:
-        body: dict[str, Any] = {
-            "author": {"type": "user", "userId": user_id},
-            "content": {"type": "text", "text": text},
-        }
+        return await self.post_content(conversation_id, user_id, {"type": "text", "text": text}, metadata)
+
+    async def post_content(
+        self, conversation_id: str, user_id: str, content: dict[str, Any], metadata: dict[str, Any] | None = None
+    ) -> Message:
+        body: dict[str, Any] = {"author": {"type": "user", "userId": user_id}, "content": content}
         if metadata:
             body["metadata"] = metadata
         resp = await self._request("POST", f"/conversations/{conversation_id}/messages", json=body)
@@ -163,3 +197,22 @@ class SunCoClient:
             if msg.id == message_id:
                 return msg
         raise SunCoError(f"message {message_id} not found in conversation", 404)
+
+    async def upload_attachment(self, conversation_id: str, filename: str, data: bytes, content_type: str) -> dict[str, Any]:
+        resp = await self._request(
+            "POST",
+            "/attachments",
+            params={"access": "public", "for": "message", "conversationId": conversation_id},
+            files={"source": (filename, data, content_type)},
+            timeout=60,
+        )
+        return resp.json()["attachment"]
+
+    async def resolve_media(self, media_url: str) -> MediaTarget:
+        """This app has private attachments: an authenticated GET answers 302 to a short-lived signed URL."""
+        if not is_sunco_media_host(media_url):
+            raise SunCoError("not a Sunshine Conversations media URL", 400)
+        resp = await self._request("GET", media_url, ok=(200, 301, 302, 303, 307, 308), follow_redirects=False)
+        if resp.is_redirect and resp.headers.get("location"):
+            return MediaTarget(redirect=resp.headers["location"])
+        return MediaTarget(data=resp.content, content_type=resp.headers.get("content-type", "application/octet-stream"))

@@ -1,6 +1,6 @@
 // Zigi voice POC client: chat with voice notes and read-aloud, plus a hands-free voice mode.
 const $ = (id) => document.getElementById(id);
-const state = { token: null, messages: new Map(), voice: null, audio: null, recorder: null, config: {} };
+const state = { token: null, messages: new Map(), voice: null, audio: null, recorder: null, config: {}, pending: [], previews: new Map(), camera: null };
 
 // ---------------------------------------------------------------- session
 async function signIn() {
@@ -49,10 +49,16 @@ function addMessage(m, { speech } = {}) {
   li.className = `msg ${m.author_type === "business" ? "bot" : "me"}`;
   if (DEBUG_LINES.some((r) => r.test(text.trim()))) li.classList.add("debug");
   li.dataset.id = m.id;
-  const bubble = document.createElement("div");
-  bubble.className = "bubble";
-  bubble.innerHTML = linkify(text || describe(m.content));
-  li.appendChild(bubble);
+  const ctype = m.content && m.content.type;
+  if ((ctype === "image" || ctype === "file") && m.content.mediaUrl) {
+    li.appendChild(attachmentView(m.content));
+  }
+  if (text || !(ctype === "image" || ctype === "file")) {
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.innerHTML = linkify(text || describe(m.content));
+    li.appendChild(bubble);
+  }
   if (m.metadata && m.metadata.input === "voice") li.classList.add("via-voice");
   if (m.author_type === "business") {
     const actions = (m.content.actions || []).filter((a) => a.type === "reply" || a.type === "postback");
@@ -82,6 +88,47 @@ function addMessage(m, { speech } = {}) {
   const list = $("messages");
   list.appendChild(li);
   list.scrollTop = list.scrollHeight;
+}
+
+function mediaSrc(url) {
+  return state.previews.get(url) || `/v1/media?url=${encodeURIComponent(url)}&token=${encodeURIComponent(state.token)}`;
+}
+
+function humanSize(bytes) {
+  if (!bytes && bytes !== 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1048576) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / 1048576).toFixed(1)} MB`;
+}
+
+function attachmentView(content) {
+  const src = mediaSrc(content.mediaUrl);
+  const remote = `/v1/media?url=${encodeURIComponent(content.mediaUrl)}&token=${encodeURIComponent(state.token)}`;
+  const a = document.createElement("a");
+  a.href = remote;
+  a.target = "_blank";
+  a.rel = "noopener";
+  if (content.type === "image") {
+    a.className = "att-img";
+    const img = document.createElement("img");
+    img.src = src;
+    img.alt = content.altText || "Image";
+    img.loading = "lazy";
+    img.onerror = () => { a.classList.add("broken"); img.remove(); a.textContent = content.altText || "Image unavailable"; };
+    a.appendChild(img);
+  } else {
+    a.className = "att-file";
+    a.innerHTML = '<span class="file-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Zm4 18H6V4h7v5h5v11Z"/></svg></span>';
+    const meta = document.createElement("span");
+    meta.className = "file-meta";
+    const name = document.createElement("strong");
+    name.textContent = content.altText || "File";
+    const size = document.createElement("small");
+    size.textContent = [humanSize(content.mediaSize), (content.mediaType || "").split("/").pop().toUpperCase()].filter(Boolean).join(" · ");
+    meta.append(name, size);
+    a.appendChild(meta);
+  }
+  return a;
 }
 
 function describe(content) {
@@ -158,6 +205,170 @@ async function readAloud(id, btn) {
     if (state.audio === audio) state.audio = null;
   };
   try { await audio.play(); } catch { btn.classList.remove("playing"); toast("Tap again to play audio."); }
+}
+
+// ---------------------------------------------------------------- attachments
+const DOC_TYPES = new Set([
+  "application/pdf", "text/plain", "text/csv", "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-powerpoint", "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+]);
+const MAX_PENDING = 10;
+const maxBytes = () => state.config.attachment_max_bytes || 4000000;
+
+function isImage(f) { return f.type.startsWith("image/") && f.type !== "image/svg+xml"; }
+
+// Phone photos are large: resize to 2048 px on the long side as JPEG, so uploads fit the 4 MB limit and stay fast on mobile data.
+async function shrinkImage(file) {
+  if (!isImage(file) || file.type === "image/gif" || !window.createImageBitmap) return file;
+  let bmp;
+  try { bmp = await createImageBitmap(file, { imageOrientation: "from-image" }); } catch { return file; }
+  const scale = Math.min(1, 2048 / Math.max(bmp.width, bmp.height));
+  if (scale === 1 && file.size <= 1500000) { bmp.close && bmp.close(); return file; }
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bmp.width * scale);
+  canvas.height = Math.round(bmp.height * scale);
+  canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
+  bmp.close && bmp.close();
+  const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.85));
+  if (!blob) return file;
+  const name = (file.name || "photo").replace(/\.[^.]+$/, "") + ".jpg";
+  return new File([blob], name, { type: "image/jpeg" });
+}
+
+async function addFiles(fileList) {
+  for (const raw of Array.from(fileList || [])) {
+    if (state.pending.length >= MAX_PENDING) { toast(`You can attach up to ${MAX_PENDING} items at a time.`); break; }
+    if (!isImage(raw) && !DOC_TYPES.has(raw.type)) { toast(`${raw.name || "That file"} isn't a supported type.`); continue; }
+    const file = await shrinkImage(raw);
+    if (file.size > maxBytes()) { toast(`${file.name} is larger than ${Math.round(maxBytes() / 1000000)} MB.`); continue; }
+    state.pending.push({ id: crypto.randomUUID(), file, preview: isImage(file) ? URL.createObjectURL(file) : null });
+  }
+  renderTray();
+}
+
+function removePending(id) {
+  const i = state.pending.findIndex((p) => p.id === id);
+  if (i >= 0) {
+    const [p] = state.pending.splice(i, 1);
+    if (p.preview) URL.revokeObjectURL(p.preview);
+  }
+  renderTray();
+}
+
+function renderTray() {
+  const tray = $("attach-tray");
+  tray.innerHTML = "";
+  for (const p of state.pending) {
+    const item = document.createElement("div");
+    item.className = p.preview ? "tray-item tray-img" : "tray-item tray-file";
+    if (p.preview) {
+      const img = document.createElement("img");
+      img.src = p.preview;
+      img.alt = p.file.name;
+      item.appendChild(img);
+    } else {
+      const name = document.createElement("span");
+      name.textContent = p.file.name;
+      const size = document.createElement("small");
+      size.textContent = humanSize(p.file.size);
+      item.append(name, size);
+    }
+    const x = document.createElement("button");
+    x.type = "button";
+    x.className = "tray-remove";
+    x.setAttribute("aria-label", `Remove ${p.file.name}`);
+    x.textContent = "×";
+    x.addEventListener("click", () => removePending(p.id));
+    item.appendChild(x);
+    tray.appendChild(item);
+  }
+  tray.hidden = state.pending.length === 0;
+  updateComposerButtons();
+}
+
+function updateComposerButtons() {
+  const hasContent = $("input").value.trim().length > 0 || state.pending.length > 0;
+  $("send-btn").hidden = !hasContent;
+  $("voice-mode-btn").hidden = hasContent;
+}
+
+async function sendAttachments(items) {
+  for (const p of items) {
+    const form = new FormData();
+    form.append("file", p.file, p.file.name);
+    $("messages").classList.add("waiting");
+    try {
+      const res = await api("/v1/attachments", { method: "POST", body: form });
+      if (!res.ok) {
+        const detail = (await res.json().catch(() => ({}))).detail;
+        toast(`${p.file.name} wasn't sent${detail ? `: ${detail}` : "."}`);
+        continue;
+      }
+      const { message } = await res.json();
+      if (p.preview) state.previews.set(message.content.mediaUrl, p.preview); // show the local copy at once
+      addMessage(message);
+    } catch {
+      toast(`${p.file.name} wasn't sent. Check your connection.`);
+    }
+  }
+}
+
+// Attach menu: Camera / Photos / Files.
+function toggleMenu(open) {
+  const menu = $("attach-menu");
+  const show = open ?? menu.hidden;
+  menu.hidden = !show;
+  $("plus-btn").setAttribute("aria-expanded", String(show));
+  if (show) $("menu-camera").focus();
+}
+
+const isTouch = () => window.matchMedia("(pointer: coarse)").matches;
+
+async function openCamera() {
+  // Phones: the file input's capture attribute opens the native camera app.
+  if (isTouch() || !navigator.mediaDevices?.getUserMedia) { $("pick-camera").click(); return; }
+  // Laptops: capture in the page from the webcam.
+  const dlg = $("camera-dialog");
+  state.camera = { facing: "user", stream: null };
+  try {
+    await startCameraStream();
+    dlg.showModal();
+  } catch {
+    toast("Camera unavailable. Choose a photo instead.");
+    $("pick-photos").click();
+  }
+}
+
+async function startCameraStream() {
+  stopCameraStream();
+  const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: state.camera.facing, width: { ideal: 1920 } }, audio: false });
+  state.camera.stream = stream;
+  $("camera-video").srcObject = stream;
+}
+
+function stopCameraStream() {
+  if (state.camera && state.camera.stream) state.camera.stream.getTracks().forEach((t) => t.stop());
+  if (state.camera) state.camera.stream = null;
+}
+
+function closeCamera() {
+  stopCameraStream();
+  const dlg = $("camera-dialog");
+  if (dlg.open) dlg.close();
+}
+
+async function shoot() {
+  const video = $("camera-video");
+  if (!video.videoWidth) return;
+  const canvas = document.createElement("canvas");
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext("2d").drawImage(video, 0, 0);
+  const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.88));
+  closeCamera();
+  if (blob) await addFiles([new File([blob], `photo-${Date.now()}.jpg`, { type: "image/jpeg" })]);
 }
 
 // ---------------------------------------------------------------- voice notes (Flow 2)
@@ -452,17 +663,46 @@ function autoGrow() {
 function wire() {
   $("tab-chat").addEventListener("click", () => showTab("chat"));
   $("tab-voice").addEventListener("click", () => showTab("voice"));
-  $("composer").addEventListener("submit", (e) => {
+  $("composer").addEventListener("submit", async (e) => {
     e.preventDefault();
     const input = $("input");
     const kind = input.dataset.input || "typed";
-    sendText(input.value, kind);
+    const text = input.value;
+    const items = state.pending.splice(0);
     input.value = "";
     delete input.dataset.input;
     $("note-hint").hidden = true;
+    renderTray();
     autoGrow();
+    if (items.length) await sendAttachments(items);
+    if (text.trim()) await sendText(text, kind);
   });
-  $("input").addEventListener("input", autoGrow);
+  $("input").addEventListener("input", () => { autoGrow(); updateComposerButtons(); });
+  $("input").addEventListener("paste", (e) => {
+    const files = Array.from(e.clipboardData?.files || []);
+    if (files.length) { e.preventDefault(); addFiles(files); }
+  });
+  const chat = $("view-chat");
+  chat.addEventListener("dragover", (e) => { if (e.dataTransfer?.types?.includes("Files")) { e.preventDefault(); chat.classList.add("dropping"); } });
+  chat.addEventListener("dragleave", (e) => { if (e.target === chat) chat.classList.remove("dropping"); });
+  chat.addEventListener("drop", (e) => { e.preventDefault(); chat.classList.remove("dropping"); addFiles(e.dataTransfer.files); });
+  $("plus-btn").addEventListener("click", (e) => { e.stopPropagation(); toggleMenu(); });
+  document.addEventListener("click", (e) => { if (!$("attach-menu").hidden && !$("attach-menu").contains(e.target)) toggleMenu(false); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("attach-menu").hidden) { toggleMenu(false); $("plus-btn").focus(); } });
+  $("menu-camera").addEventListener("click", () => { toggleMenu(false); openCamera(); });
+  $("menu-photos").addEventListener("click", () => { toggleMenu(false); $("pick-photos").click(); });
+  $("menu-files").addEventListener("click", () => { toggleMenu(false); $("pick-files").click(); });
+  for (const id of ["pick-camera", "pick-photos", "pick-files"]) {
+    $(id).addEventListener("change", (e) => { addFiles(e.target.files); e.target.value = ""; });
+  }
+  $("camera-cancel").addEventListener("click", closeCamera);
+  $("camera-dialog").addEventListener("close", stopCameraStream);
+  $("camera-shoot").addEventListener("click", shoot);
+  $("camera-flip").addEventListener("click", async () => {
+    state.camera.facing = state.camera.facing === "user" ? "environment" : "user";
+    try { await startCameraStream(); } catch { toast("No other camera found."); }
+  });
+  $("voice-mode-btn").addEventListener("click", () => { showTab("voice"); if (!state.voice) startVoice(); });
   $("input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("composer").requestSubmit(); }
   });

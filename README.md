@@ -26,10 +26,15 @@ Logs, traces and per-turn metrics go to Pydantic Logfire when `LOGFIRE_TOKEN` (o
 | --- | --- |
 | Voice | Mic PCM streams over a WebSocket to ElevenLabs Scribe realtime (live captions, server VAD). The final transcript goes to SunCo with `metadata.channel=voice`. Bot replies come back by polling or webhook, pass through the telco Speech Renderer, and stream back as ElevenLabs Flash TTS, sentence by sentence. Talk over the assistant to interrupt it. |
 | Chat | Text messages, quick-reply chips, a voice-note button (Scribe batch STT; the transcript is shown for review before sending) and a speaker button on each bot reply (cached TTS). |
+| Attachments | The + button opens Camera, Photos and Files. Photos are resized in the browser (2048 px, JPEG); files up to 4 MB (PDF, Office, text, CSV, images). The gateway uploads to SunCo and posts an `image` or `file` message. |
 
 The Speech Renderer reads `*138#` as "star one three eight hash", `024XXXXXXX` as "zero two four followed by 7 digits", `GH₵10.50` as "10 cedis 50 pesewas" and `5GB` as "5 gigabytes", and replaces links with "linked on screen". The dev bot's debug lines (`zigi 2 preprod`, `PRODUCTION`) are shown dimmed and not spoken (`SPEECH_SKIP_PATTERNS`).
 
 When the bot is slow, the gateway speaks a holding phrase after 2.5 s (`HOLD_PROMPT`, `HOLD_AFTER_S`) and gives up after 45 s (`BOT_TIMEOUT_S`).
+
+## Attachments and privacy
+
+This SunCo app has private attachments: a `mediaUrl` needs the app key. `GET /v1/media?url=…` checks that the attachment is in the caller's own conversation, then fetches a short-lived signed URL with the app key and redirects the browser to it. The key never reaches the client, and it is only ever sent to `*.zendesk.com` or `*.smooch.io`. The 4 MB limit (`ATTACHMENT_MAX_BYTES`) sits under Vercel's 4.5 MB request-body cap.
 
 ## Layout
 

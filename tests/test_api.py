@@ -138,3 +138,44 @@ def test_sse_survives_keepalive_timeouts():
                     break
         assert sum(1 for line in got if line.startswith(": keep-alive")) >= 2
         assert got[-1] == "event: bot_message"
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+
+def test_attachment_upload_and_owner_only_media(client, token):
+    r = client.post(
+        "/v1/attachments",
+        files={"file": ("../../etc/photo.png", PNG, "image/png")},
+        data={"text": "my SIM card"},
+        headers=auth(token),
+    )
+    assert r.status_code == 200, r.text
+    content = r.json()["message"]["content"]
+    assert content["type"] == "image" and content["text"] == "my SIM card"
+    assert content["altText"] == "photo.png" and content["mediaSize"] == len(PNG)
+    media = client.get("/v1/media", params={"url": content["mediaUrl"], "token": token})
+    assert media.status_code == 200 and media.content == PNG and media.headers["content-type"] == "image/png"
+    other = client.post("/v1/session", json={}).json()["token"]
+    assert client.get("/v1/media", params={"url": content["mediaUrl"], "token": other}).status_code == 404
+    assert "attachment" in wait_for_bot(client, token)[0]["content"]["text"]
+
+
+def test_pdf_is_sent_as_file_message(client, token):
+    r = client.post("/v1/attachments", files={"file": ("bill.pdf", b"%PDF-1.4 x", "application/pdf")}, headers=auth(token))
+    assert r.json()["message"]["content"]["type"] == "file"
+
+
+def test_attachment_rejects_bad_types_and_sizes():
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+    from tests.conftest import mock_settings
+
+    with TestClient(create_app(mock_settings(attachment_max_bytes=100))) as c:
+        tok = c.post("/v1/session", json={}).json()["token"]
+        h = auth(tok)
+        assert c.post("/v1/attachments", files={"file": ("x.exe", b"MZ", "application/x-msdownload")}, headers=h).status_code == 415
+        assert c.post("/v1/attachments", files={"file": ("x.svg", b"<svg/>", "image/svg+xml")}, headers=h).status_code == 415
+        assert c.post("/v1/attachments", files={"file": ("big.png", PNG * 10, "image/png")}, headers=h).status_code == 413
+        assert c.get("/v1/media", params={"url": "https://evil.example/x.png", "token": tok}).status_code == 404

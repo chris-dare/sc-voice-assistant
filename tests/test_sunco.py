@@ -120,3 +120,30 @@ async def test_tts_retries_on_rate_limit():
         tts = ElevenLabsTTS("k", "https://el.test", "v1", http)
         audio = b"".join([c async for c in tts.stream("hi", "m", "pcm_24000")])
     assert audio == b"\x01\x02audio" and route.call_count == 2
+
+
+@respx.mock
+async def test_upload_attachment_and_resolve_private_media():
+    up = respx.post(f"{BASE}/attachments").mock(
+        return_value=httpx.Response(
+            201, json={"attachment": {"mediaUrl": "https://acme.zendesk.com/sc/attachments/v2/A1/p.png", "mediaType": "image/png"}}
+        )
+    )
+    att = await client().upload_attachment("c1", "p.png", b"png", "image/png")
+    assert att["mediaUrl"].endswith("/p.png")
+    q = dict(up.calls.last.request.url.params)
+    assert q == {"access": "public", "for": "message", "conversationId": "c1"}
+    assert b'name="source"; filename="p.png"' in up.calls.last.request.read()
+
+    respx.get("https://acme.zendesk.com/sc/attachments/v2/A1/p.png").mock(
+        return_value=httpx.Response(302, headers={"location": "https://p18.zdusercontent.com/signed?x=1"})
+    )
+    target = await client().resolve_media("https://acme.zendesk.com/sc/attachments/v2/A1/p.png")
+    assert target.redirect == "https://p18.zdusercontent.com/signed?x=1"
+
+
+async def test_resolve_media_never_sends_key_to_other_hosts():
+    with pytest.raises(SunCoError):
+        await client().resolve_media("https://evil.example/sc/attachments/v2/A1/p.png")
+    with pytest.raises(SunCoError):
+        await client().resolve_media("http://acme.zendesk.com/sc/attachments/v2/A1/p.png")

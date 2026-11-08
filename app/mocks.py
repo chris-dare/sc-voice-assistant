@@ -31,6 +31,7 @@ class MockSunCo:
         self._convs: dict[str, str] = {}
         self._messages: dict[str, list[Message]] = defaultdict(list)
         self._clock = itertools.count()
+        self._media: dict[str, tuple[bytes, str]] = {}
 
     def _msg(self, conv: str, author: str, content: dict[str, Any], metadata: dict[str, Any] | None = None) -> Message:
         m = Message(
@@ -59,6 +60,9 @@ class MockSunCo:
     async def _reply(self, conv: str, text: str) -> None:
         await asyncio.sleep(self._delay)
         lowered = text.lower()
+        if lowered == "attachment":
+            self._msg(conv, "business", {"type": "text", "text": "Thanks, I've received your attachment."})
+            return
         answer = next((a for k, a in _FAQ.items() if k in lowered), None)
         if answer:
             self._msg(conv, "business", {"type": "text", "text": answer})
@@ -81,6 +85,28 @@ class MockSunCo:
 
     async def list_messages(self, conversation_id: str) -> list[Message]:
         return list(self._messages[conversation_id][-100:])
+
+    async def post_content(
+        self, conversation_id: str, user_id: str, content: dict[str, Any], metadata: dict[str, Any] | None = None
+    ) -> Message:
+        msg = self._msg(conversation_id, "user", content, metadata)
+        if content.get("type") in {"image", "file"}:
+            asyncio.get_running_loop().create_task(self._reply(conversation_id, "attachment"))
+        return msg
+
+    async def upload_attachment(self, conversation_id: str, filename: str, data: bytes, content_type: str) -> dict[str, Any]:
+        media_id = uuid.uuid4().hex
+        self._media[media_id] = (data, content_type)
+        return {"mediaUrl": f"https://mock.zendesk.com/sc/attachments/v2/{media_id}/{filename}", "mediaType": content_type}
+
+    async def resolve_media(self, media_url: str):
+        from .sunco import MediaTarget, SunCoError
+
+        media_id = media_url.rstrip("/").split("/")[-2]
+        if media_id not in self._media:
+            raise SunCoError("not found", 404)
+        data, ctype = self._media[media_id]
+        return MediaTarget(data=data, content_type=ctype)
 
     async def get_message(self, conversation_id: str, message_id: str) -> Message:
         for m in self._messages[conversation_id]:

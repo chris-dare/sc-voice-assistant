@@ -15,6 +15,7 @@ from fastapi import (
     Depends,
     FastAPI,
     File,
+    Form,
     Header,
     HTTPException,
     Query,
@@ -22,7 +23,7 @@ from fastapi import (
     UploadFile,
     WebSocket,
 )
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -35,12 +36,37 @@ from .services import Services, UserContext, build_services
 from .session import VoiceSession
 from .speech import render
 from .stt import STTError
-from .sunco import SunCoError
+from .sunco import SunCoError, media_urls
 from .tts import TTSError, content_type_for
 
 log = logging.getLogger("app")
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 MAX_VOICE_NOTE_BYTES = 10 * 1024 * 1024
+_ALLOWED_FILE_TYPES = {
+    "application/pdf",
+    "text/plain",
+    "text/csv",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
+_EXT = {"image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp", "image/heic": "heic"}
+
+
+def allowed_attachment_type(ctype: str) -> bool:
+    return ctype in _ALLOWED_FILE_TYPES or (ctype.startswith("image/") and ctype != "image/svg+xml")
+
+
+def safe_filename(name: str | None, ctype: str) -> str:
+    """Keep a readable base name; drop paths and characters that break headers or URLs."""
+    import re
+
+    base = (name or "").replace("\\", "/").split("/")[-1].strip()
+    base = re.sub(r"[^A-Za-z0-9._ -]", "_", base)[:100].strip(" .")
+    return base or f"attachment.{_EXT.get(ctype, 'bin')}"
 
 
 def create_app(settings: Settings | None = None, services: Services | None = None) -> FastAPI:
@@ -111,6 +137,7 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
             "stt_sample_rate": 16000,
             "mock": s.mock_providers,
             "access_code_required": bool(s.demo_access_code),
+            "attachment_max_bytes": s.attachment_max_bytes,
         }
 
     # ------------------------------------------------------------------ text mode
@@ -173,6 +200,68 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
         except SunCoError as exc:
             raise HTTPException(502, str(exc)) from exc
         return {"message": msg.to_dict()}
+
+    @app.post("/v1/attachments")
+    async def send_attachment(
+        user: User,
+        request: Request,
+        file: Annotated[UploadFile, File()],
+        text: Annotated[str | None, Form(max_length=2000)] = None,
+    ) -> dict[str, Any]:
+        """Upload a photo or file to SunCo and post it as an image or file message from the user."""
+        s = svc(request)
+        limit = s.settings.attachment_max_bytes
+        data = await file.read(limit + 1)
+        if len(data) > limit:
+            raise HTTPException(413, f"attachment is larger than {limit // 1_000_000} MB")
+        if not data:
+            raise HTTPException(400, "attachment is empty")
+        ctype = (file.content_type or "application/octet-stream").split(";")[0].strip().lower()
+        if not allowed_attachment_type(ctype):
+            raise HTTPException(415, f"{ctype} files are not supported")
+        name = safe_filename(file.filename, ctype)
+        try:
+            att = await s.provider.upload_attachment(user.conversation_id, name, data, ctype)
+            content: dict[str, Any] = {
+                "type": "image" if ctype.startswith("image/") else "file",
+                "mediaUrl": att["mediaUrl"],
+                "mediaType": att.get("mediaType") or ctype,
+                "mediaSize": len(data),
+                "altText": name[:128],
+            }
+            if text and text.strip():
+                content["text"] = text.strip()
+            msg = await s.provider.post_content(
+                user.conversation_id,
+                user.sunco_user_id,
+                content,
+                {"channel": "text", "source": "sc-voice-gateway", "input": "attachment"},
+            )
+        except SunCoError as exc:
+            if exc.status in (400, 413, 415, 422):
+                raise HTTPException(422, "The messaging service rejected this file.") from exc
+            raise HTTPException(502, str(exc)) from exc
+        return {"message": msg.to_dict()}
+
+    @app.get("/v1/media")
+    async def media(url: str, user: User, request: Request) -> Response:
+        """Serve an attachment from the caller's conversation. Attachments are private in SunCo, so the
+        gateway fetches a short-lived signed URL with the app key and redirects the browser to it."""
+        s = svc(request)
+        try:
+            msgs = await s.provider.list_messages(user.conversation_id)
+        except SunCoError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        if not any(url in media_urls(m.content) for m in msgs):
+            raise HTTPException(404, "attachment not found")
+        try:
+            target = await s.provider.resolve_media(url)
+        except SunCoError as exc:
+            raise HTTPException(404 if exc.status in (400, 401, 403, 404) else 502, "attachment unavailable") from exc
+        headers = {"cache-control": "private, max-age=60"}
+        if target.redirect:
+            return RedirectResponse(target.redirect, status_code=302, headers=headers)
+        return Response(target.data or b"", media_type=target.content_type, headers=headers)
 
     @app.post("/v1/voice-notes")
     async def voice_note(user: User, request: Request, file: Annotated[UploadFile, File()]) -> dict[str, Any]:

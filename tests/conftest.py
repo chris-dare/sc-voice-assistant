@@ -1,3 +1,9 @@
+import os
+
+# Keep test runs out of Logfire, whatever keys the shell has.
+for _var in ("LOGFIRE_TOKEN", "LOGFIRE_API_KEY"):
+    os.environ.pop(_var, None)
+
 import pytest
 from fastapi.testclient import TestClient
 

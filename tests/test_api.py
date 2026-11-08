@@ -111,3 +111,30 @@ def test_access_code_gate():
         assert c.post("/v1/session", json={}).status_code == 403
         assert c.post("/v1/session", json={"access_code": "nope"}).status_code == 403
         assert c.post("/v1/session", json={"access_code": "open-sesame"}).status_code == 200
+
+
+def test_sse_survives_keepalive_timeouts():
+    """Regression: a keep-alive timeout used to close the subscription and crash the stream."""
+    import threading
+
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+    from tests.conftest import mock_settings
+
+    with TestClient(create_app(mock_settings(sse_keepalive_s=0.2))) as c:
+        tok = c.post("/v1/session", json={}).json()["token"]
+        got: list[str] = []
+
+        def send_later():
+            time.sleep(1.0)  # several keep-alive timeouts first
+            c.post("/v1/messages", json={"text": "tell me about momo"}, headers=auth(tok))
+
+        threading.Thread(target=send_later).start()
+        with c.stream("GET", "/v1/conversations/me/stream", params={"token": tok}) as r:
+            for line in r.iter_lines():
+                got.append(line)
+                if line.startswith("event: bot_message"):
+                    break
+        assert sum(1 for line in got if line.startswith(": keep-alive")) >= 2
+        assert got[-1] == "event: bot_message"

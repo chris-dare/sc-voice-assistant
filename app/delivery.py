@@ -13,6 +13,8 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator
 from typing import Any
 
+import logfire
+
 from .bus import Bus, channel_for
 from .sunco import ConversationProvider, Message, SunCoError
 
@@ -72,7 +74,10 @@ class Poller:
         backoff = self._interval
         while True:
             try:
-                for m in await self._provider.list_messages(conversation_id):
+                # Polls run every 0.5 s: keep them out of traces and logs (they were ~90% of volume).
+                with logfire.suppress_instrumentation():
+                    messages = await self._provider.list_messages(conversation_id)
+                for m in messages:
                     if seen.add(m.id) and m.author_type == "business":
                         await publish_bot_message(self._bus, m)
                 backoff = self._interval

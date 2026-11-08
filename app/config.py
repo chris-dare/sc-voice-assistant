@@ -63,6 +63,7 @@ class Settings(BaseSettings):
     mock_providers: bool = False
     log_level: str = "INFO"
     environment: str = "dev"
+    sse_keepalive_s: float = 15.0
     # When set, /v1/session asks for this code (protects vendor credit on a public demo URL).
     demo_access_code: str = ""
 

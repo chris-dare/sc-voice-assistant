@@ -131,17 +131,28 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
         async def events() -> AsyncIterator[bytes]:
             yield b": connected\n\n"
             async with s.bus.subscribe(channel_for(user.conversation_id)) as sub, s.watcher.watch(user.conversation_id):
-                it = sub.__aiter__()
-                while True:
-                    if await request.is_disconnected():
-                        return
-                    try:
-                        event = await asyncio.wait_for(it.__anext__(), timeout=15)
-                    except TimeoutError:
-                        yield b": keep-alive\n\n"
-                        continue
-                    if event.get("kind") == "bot_message":
-                        yield f"event: bot_message\ndata: {json.dumps(event['message'])}\n\n".encode()
+                # Pump the subscription into a queue: a timeout must cancel queue.get(), never the
+                # subscription's async generator (cancelling __anext__ closes it for good).
+                queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+                async def pump() -> None:
+                    async for ev in sub:
+                        queue.put_nowait(ev)
+
+                pump_task = asyncio.create_task(pump())
+                try:
+                    while True:
+                        if await request.is_disconnected():
+                            return
+                        try:
+                            event = await asyncio.wait_for(queue.get(), timeout=s.settings.sse_keepalive_s)
+                        except TimeoutError:
+                            yield b": keep-alive\n\n"
+                            continue
+                        if event.get("kind") == "bot_message":
+                            yield f"event: bot_message\ndata: {json.dumps(event['message'])}\n\n".encode()
+                finally:
+                    pump_task.cancel()
 
         return StreamingResponse(events(), media_type="text/event-stream", headers={"cache-control": "no-cache", "x-accel-buffering": "no"})
 

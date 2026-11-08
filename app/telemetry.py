@@ -35,6 +35,8 @@ def setup(app: FastAPI, service_version: str, environment: str, log_level: str) 
             handlers=[logging.StreamHandler(), logfire.LogfireLoggingHandler()],
             force=True,
         )
+        # httpx logs one INFO line per request; the httpx spans already carry that.
+        logging.getLogger("httpx").setLevel(logging.WARNING)
         _configured = True
     logfire.instrument_fastapi(app, excluded_urls="/healthz")
 

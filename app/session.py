@@ -31,6 +31,7 @@ from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from . import telemetry
 from .bus import channel_for
 from .delivery import SeenSet
 from .services import Services, UserContext
@@ -52,7 +53,8 @@ class Turn:
     t_speech_end: float | None
     t_final: float
     t_posted: float | None = None
-    t_bot_first: float | None = None
+    t_bot_any: float | None = None  # first bot message of any kind
+    t_bot_first: float | None = None  # first bot message that is spoken
     t_tts_first: float | None = None
     reported: bool = False
 
@@ -124,9 +126,7 @@ class VoiceSession:
             }
         )
         await self.send({"type": "state", "state": "listening"})
-        async with self.svc.bus.subscribe(channel_for(self.ctx.conversation_id)) as sub, self.svc.watcher.watch(
-            self.ctx.conversation_id
-        ):
+        async with self.svc.bus.subscribe(channel_for(self.ctx.conversation_id)) as sub, self.svc.watcher.watch(self.ctx.conversation_id):
             tasks = [
                 asyncio.create_task(self._recv_loop(), name="recv"),
                 asyncio.create_task(self._bot_loop(sub), name="bot"),
@@ -159,7 +159,9 @@ class VoiceSession:
             log.warning("falling back to batch STT: %s", exc)
             self.rt = None
             self.stt_mode = "batch"
-            await self.send({"type": "notice", "code": "stt_batch_fallback", "text": "Live captions are unavailable; using batch speech recognition."})
+            await self.send(
+                {"type": "notice", "code": "stt_batch_fallback", "text": "Live captions are unavailable; using batch speech recognition."}
+            )
 
     # ------------------------------------------------------------------ inbound
     async def _recv_loop(self) -> None:
@@ -282,12 +284,12 @@ class VoiceSession:
         """Holding phrase while the bot is slow; timeout notice if it never answers."""
         if self.cfg.hold_prompt:
             await asyncio.sleep(self.cfg.hold_after_s)
-            if self.turn is turn and turn.t_bot_first is None and not self.state.user_speaking:
+            if self.turn is turn and turn.t_bot_any is None and not self.state.user_speaking:
                 self.queue.put_nowait(SpeakItem("hold", self.cfg.hold_prompt, is_hold=True))
             await asyncio.sleep(max(0.0, self.cfg.bot_timeout_s - self.cfg.hold_after_s))
         else:
             await asyncio.sleep(self.cfg.bot_timeout_s)
-        if self.turn is turn and turn.t_bot_first is None:
+        if self.turn is turn and turn.t_bot_any is None:
             await self.send({"type": "notice", "code": "bot_timeout", "text": "The assistant is taking longer than usual."})
             await self.set_state("listening")
 
@@ -299,30 +301,32 @@ class VoiceSession:
             if not self.seen.add(msg.id):
                 continue
             turn = self.turn
-            if turn and turn.t_bot_first is None:
-                turn.t_bot_first = time.monotonic()
+            if turn and turn.t_bot_any is None:
+                turn.t_bot_any = time.monotonic()
                 asyncio.create_task(self.svc.provider.typing(self.ctx.conversation_id, self.ctx.sunco_user_id, False))
             speech = render(msg.content)
             spoken = self.svc.speakable(msg.text) and bool(speech)
             await self.send({"type": "bot_message", "message": msg.to_dict(), "speech": speech if spoken else ""})
             if spoken:
+                if turn and turn.t_bot_first is None:
+                    turn.t_bot_first = time.monotonic()
                 self.queue.put_nowait(SpeakItem(msg.id, speech, turn))
 
     # ------------------------------------------------------------------ speaking
     async def _speaker_loop(self) -> None:
         while True:
             item = await self.queue.get()
-            if item.is_hold and (self.turn is None or self.turn.t_bot_first is not None):
+            if item.is_hold and (self.turn is None or self.turn.t_bot_any is not None):
                 continue  # the real answer arrived first
             # Never talk over the user: wait while they speak (client VAD or live partials).
-            while self.state.user_speaking or time.monotonic() - self.state.last_partial < 0.8:
+            while self.state.user_speaking or time.monotonic() - self.state.last_partial < 0.8:  # noqa: ASYNC110
                 await asyncio.sleep(0.1)
             self.speaking = asyncio.create_task(self._speak(item))
             # wait() rather than await: a barge-in cancels the speaking task, not this loop.
             await asyncio.wait({self.speaking})
             self.speaking = None
             if self.queue.empty():
-                waiting = self.turn is not None and self.turn.t_bot_first is None
+                waiting = self.turn is not None and self.turn.t_bot_first is None and self.turn.t_bot_any is None
                 await self.set_state("thinking" if waiting else "listening")
 
     async def _speak(self, item: SpeakItem) -> None:
@@ -406,7 +410,7 @@ class VoiceSession:
             "gateway_ms": total - bot_ms,
             "total_ms": total,
         }
-        log.info("turn metrics %s", metrics)
+        telemetry.turn_metrics(metrics)
         await self.send(metrics)
 
     async def _watchdog(self) -> None:

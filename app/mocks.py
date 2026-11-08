@@ -63,11 +63,19 @@ class MockSunCo:
         if answer:
             self._msg(conv, "business", {"type": "text", "text": answer})
             await asyncio.sleep(self._delay)
-            self._msg(conv, "business", {"type": "text", "text": "Anything else?", "actions": [
-                {"type": "reply", "text": "Data bundles", "payload": "bundle"},
-                {"type": "reply", "text": "MoMo", "payload": "momo"},
-                {"type": "reply", "text": "Roaming", "payload": "roaming"},
-            ]})
+            self._msg(
+                conv,
+                "business",
+                {
+                    "type": "text",
+                    "text": "Anything else?",
+                    "actions": [
+                        {"type": "reply", "text": "Data bundles", "payload": "bundle"},
+                        {"type": "reply", "text": "MoMo", "payload": "momo"},
+                        {"type": "reply", "text": "Roaming", "payload": "roaming"},
+                    ],
+                },
+            )
         else:
             self._msg(conv, "business", {"type": "text", "text": f"You said: {text}. Ask me about data bundles, MoMo or roaming."})
 
@@ -138,9 +146,7 @@ class MockTTS:
         if output_format.startswith("pcm_"):
             rate = int(output_format.split("_")[1])
         n = int(rate * min(3.0, 0.04 * max(1, len(text))))
-        samples = b"".join(
-            struct.pack("<h", int(3000 * math.sin(2 * math.pi * 440 * i / rate))) for i in range(n)
-        )
+        samples = b"".join(struct.pack("<h", int(3000 * math.sin(2 * math.pi * 440 * i / rate))) for i in range(n))
         if not output_format.startswith("pcm_"):
             from .stt import pcm16_to_wav
 

@@ -43,9 +43,19 @@ class STTProvider(Protocol):
 
 
 _ERROR_TYPES = {
-    "error", "auth_error", "quota_exceeded", "transcriber_error", "rate_limited", "input_error",
-    "invalid_request", "queue_overflow", "resource_exhausted", "session_time_limit_exceeded",
-    "chunk_size_exceeded", "unaccepted_terms", "unaccepted_terms_error",
+    "error",
+    "auth_error",
+    "quota_exceeded",
+    "transcriber_error",
+    "rate_limited",
+    "input_error",
+    "invalid_request",
+    "queue_overflow",
+    "resource_exhausted",
+    "session_time_limit_exceeded",
+    "chunk_size_exceeded",
+    "unaccepted_terms",
+    "unaccepted_terms_error",
 }
 
 

@@ -6,6 +6,7 @@ requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.162.2",
     "httpx>=0.28.1",
+    "logfire[fastapi,httpx]>=5.5.0",
     "pydantic-settings>=2.16.2",
     "python-multipart>=0.0.33",
     "redis>=8.1.0",
@@ -20,3 +21,15 @@ dev = [
     "respx>=0.23.1",
     "ruff>=0.17.4",
 ]
+
+[tool.ruff]
+line-length = 140
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
+ignore = ["B008"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

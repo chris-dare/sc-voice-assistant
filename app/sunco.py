@@ -77,9 +77,7 @@ class Message:
 class ConversationProvider(Protocol):
     async def ensure_user(self, external_id: str) -> str: ...
     async def ensure_conversation(self, user_id: str) -> str: ...
-    async def post_text(
-        self, conversation_id: str, user_id: str, text: str, metadata: dict[str, Any] | None = None
-    ) -> Message: ...
+    async def post_text(self, conversation_id: str, user_id: str, text: str, metadata: dict[str, Any] | None = None) -> Message: ...
     async def list_messages(self, conversation_id: str) -> list[Message]: ...
     async def get_message(self, conversation_id: str, message_id: str) -> Message: ...
     async def typing(self, conversation_id: str, user_id: str, start: bool) -> None: ...
@@ -119,9 +117,7 @@ class SunCoClient:
                 if resp.status_code in ok:
                     return resp
                 if resp.status_code not in _RETRY_STATUS or attempt == 2:
-                    raise SunCoError(
-                        f"SunCo {method} {path} -> {resp.status_code}: {resp.text[:300]}", resp.status_code
-                    )
+                    raise SunCoError(f"SunCo {method} {path} -> {resp.status_code}: {resp.text[:300]}", resp.status_code)
             await asyncio.sleep(delay)
             delay *= 2
         raise AssertionError("unreachable")
@@ -145,9 +141,7 @@ class SunCoClient:
         )
         return resp.json()["conversation"]["id"]
 
-    async def post_text(
-        self, conversation_id: str, user_id: str, text: str, metadata: dict[str, Any] | None = None
-    ) -> Message:
+    async def post_text(self, conversation_id: str, user_id: str, text: str, metadata: dict[str, Any] | None = None) -> Message:
         body: dict[str, Any] = {
             "author": {"type": "user", "userId": user_id},
             "content": {"type": "text", "text": text},
@@ -162,8 +156,11 @@ class SunCoClient:
         return [Message.from_api(conversation_id, m) for m in resp.json().get("messages") or []]
 
     async def get_message(self, conversation_id: str, message_id: str) -> Message:
-        resp = await self._request("GET", f"/conversations/{conversation_id}/messages/{message_id}")
-        return Message.from_api(conversation_id, resp.json()["message"])
+        # The v2 API has no GET for a single message (it answers 404), so search the latest page.
+        for msg in await self.list_messages(conversation_id):
+            if msg.id == message_id:
+                return msg
+        raise SunCoError(f"message {message_id} not found in conversation", 404)
 
     async def typing(self, conversation_id: str, user_id: str, start: bool) -> None:
         try:

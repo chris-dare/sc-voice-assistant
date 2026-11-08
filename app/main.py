@@ -1,7 +1,5 @@
 """Voice Gateway HTTP and WebSocket API."""
 
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import json
@@ -11,11 +9,23 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile, WebSocket
+import logfire
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    WebSocket,
+)
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import telemetry
 from .auth import AuthError, issue_token, new_user_id, verify_token
 from .bus import channel_for
 from .config import Settings, get_settings
@@ -34,7 +44,6 @@ MAX_VOICE_NOTE_BYTES = 10 * 1024 * 1024
 
 def create_app(settings: Settings | None = None, services: Services | None = None) -> FastAPI:
     settings = settings or get_settings()
-    logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -43,6 +52,7 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
         await app.state.svc.aclose()
 
     app = FastAPI(title="SC Voice Gateway", version="0.1.0", lifespan=lifespan)
+    telemetry.setup(app, app.version, settings.environment, settings.log_level)
 
     def svc(request: Request) -> Services:
         return request.app.state.svc
@@ -203,7 +213,8 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
             await ws.send_text(json.dumps({"type": "error", "code": "unavailable", "text": "Conversation service unavailable."}))
             await ws.close(code=1011)
             return
-        await VoiceSession(ws, s, ctx).run()
+        with logfire.span("voice session {conversation_id}", conversation_id=ctx.conversation_id):
+            await VoiceSession(ws, s, ctx).run()
         with contextlib.suppress(Exception):
             await ws.close()
 

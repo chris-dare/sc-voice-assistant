@@ -35,9 +35,7 @@ class Settings(BaseSettings):
     stt_language: str | None = "en"
     stt_vad_silence_s: float = 0.6
     # Telco vocabulary that helps STT spell plan and product names right.
-    stt_keyterms: list[str] = Field(
-        default_factory=lambda: ["data bundle", "airtime", "MoMo", "roaming", "USSD", "SIM", "PUK"]
-    )
+    stt_keyterms: list[str] = Field(default_factory=lambda: ["data bundle", "airtime", "MoMo", "roaming", "USSD", "SIM", "PUK"])
     tts_voice_id: str = "JBFqnCBsd6RMkjVDRZzb"
     tts_model_voice: str = "eleven_flash_v2_5"  # lowest latency, voice mode
     tts_model_readaloud: str = "eleven_multilingual_v2"  # higher quality, read-aloud
@@ -64,6 +62,7 @@ class Settings(BaseSettings):
     # Fake SunCo bot, STT and TTS: lets the demo run with no network or keys.
     mock_providers: bool = False
     log_level: str = "INFO"
+    environment: str = "dev"
 
     @property
     def sunco_configured(self) -> bool:

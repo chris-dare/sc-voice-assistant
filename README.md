@@ -41,7 +41,7 @@ The voice screen has a switch, shown when `AGENT_MODE_ENABLED=true` (the feature
 
 ### The agent service (`zigi_agent/`)
 
-A separate service built on Pydantic AI. The gateway sends each turn with the call's state (history, Zigi state) and gets back an NDJSON stream of sentences to speak (`POST /v1/turn`, see `zigi_agent/turn.py`). With `AGENT_SERVICE_URL` empty the gateway runs the same code in-process (local dev, tests, and today's Vercel deploy).
+A separate service built on Pydantic AI. The gateway sends each turn with the call's state (history, Zigi state) and gets back an NDJSON stream of sentences to speak (`POST /v1/turn`, see `zigi_agent/turn.py`). Deployed as its own Vercel project, `sc-voice-agent` (https://sc-voice-agent-eosin.vercel.app), called with a bearer token (`AGENT_SERVICE_TOKEN` on both projects). With `AGENT_SERVICE_URL` empty the gateway runs the same code in-process (local dev, tests).
 
 | Capability | What it does |
 | --- | --- |
@@ -84,6 +84,18 @@ This SunCo app has private attachments: a `mediaUrl` needs the app key. `GET /v1
 | `app/telemetry.py` | Logfire setup |
 | `web/` | Web POC client (no build step) |
 | `docs/protocol.md` | Voice WebSocket protocol |
+
+## Deploying
+
+Every deploy runs `scripts/audit.sh` first: `uv audit` for the Python dependencies (gateway and agent service share `uv.lock`) and `npm audit` for the web client's only third-party code, the posthog-js version PostHog's CDN serves.
+
+```bash
+scripts/deploy_gateway.sh
+```
+
+```bash
+scripts/deploy_agent.sh
+```
 
 ## Tests
 

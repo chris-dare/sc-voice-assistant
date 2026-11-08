@@ -67,6 +67,13 @@ class Settings(BaseSettings):
     sse_keepalive_s: float = 15.0
     # Vercel caps a request body at 4.5 MB; the client downsizes photos well below this.
     attachment_max_bytes: int = 4_000_000
+    # PostHog product analytics (client side). The project token is public by design.
+    posthog_project_token: str = ""
+    posthog_region: str = "EU Cloud"
+
+    @property
+    def posthog_api_host(self) -> str:
+        return "https://eu.i.posthog.com" if "eu" in self.posthog_region.lower() else "https://us.i.posthog.com"
     # When set, /v1/session asks for this code (protects vendor credit on a public demo URL).
     demo_access_code: str = ""
 

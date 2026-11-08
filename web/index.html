@@ -92,6 +92,14 @@
       </dialog>
     </footer>
     <div id="toast" class="toast" role="status" hidden></div>
+    <dialog id="code-dialog" class="code-dialog" aria-labelledby="code-title">
+      <form id="code-form" method="dialog">
+        <h2 id="code-title">Enter the demo access code</h2>
+        <p id="code-error" class="code-error" hidden>That code didn't work. Try again.</p>
+        <input id="code-input" type="text" inputmode="text" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" aria-label="Access code" required />
+        <button type="submit" class="voice-btn">Continue</button>
+      </form>
+    </dialog>
   </main>
   <script type="module" src="/static/app.js"></script>
 </body>

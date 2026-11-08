@@ -1,27 +1,55 @@
 // Zigi voice POC client: chat with voice notes and read-aloud, plus a hands-free voice mode.
 import { Orb } from "./orb.js";
+import { initAnalytics, identify, track } from "./analytics.js";
 
 const $ = (id) => document.getElementById(id);
 let orb = null;
 const state = { token: null, messages: new Map(), voice: null, audio: null, recorder: null, config: {}, pending: [], previews: new Map(), camera: null };
 
 // ---------------------------------------------------------------- session
+// Asks for the access code in the page itself: window.prompt is blocked in some in-app browsers,
+// which locked people out (bursts of 403s in the logs).
+function askCode(wrong) {
+  return new Promise((resolve) => {
+    const dlg = $("code-dialog");
+    $("code-error").hidden = !wrong;
+    $("code-input").value = "";
+    $("code-form").onsubmit = (e) => {
+      e.preventDefault();
+      const v = $("code-input").value.trim();
+      if (!v) return;
+      dlg.close();
+      resolve(v);
+    };
+    dlg.showModal();
+    $("code-input").focus();
+  });
+}
+
 async function signIn() {
   state.config = await (await fetch("/v1/config")).json();
+  initAnalytics(state.config);
   let userId = null;
   let code = "";
   try { userId = localStorage.getItem("zigi_user_id"); code = localStorage.getItem("zigi_access_code") || ""; } catch {}
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (state.config.access_code_required && !code) {
-      code = (window.prompt("Enter the demo access code") || "").trim();
-    }
+  let wrong = false;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (state.config.access_code_required && !code) code = await askCode(wrong);
     const body = { ...(userId ? { user_id: userId } : {}), ...(code ? { access_code: code } : {}) };
     const res = await fetch("/v1/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-    if (res.status === 403) { code = ""; continue; }
-    if (!res.ok) throw new Error(`sign-in failed (${res.status})`);
+    if (res.status === 403) {
+      track("signin_failed", { reason: "bad_access_code", attempt });
+      try { localStorage.removeItem("zigi_access_code"); } catch {}
+      code = "";
+      wrong = true;
+      continue;
+    }
+    if (!res.ok) { track("signin_failed", { reason: `http_${res.status}`, attempt }); throw new Error(`sign-in failed (${res.status})`); }
     const data = await res.json();
     try { localStorage.setItem("zigi_user_id", data.user_id); if (code) localStorage.setItem("zigi_access_code", code); } catch {}
     state.token = data.token;
+    identify(data.user_id);
+    track("signin_succeeded", { attempts: attempt + 1, returning: !!userId });
     return;
   }
   throw new Error("access code rejected");
@@ -188,9 +216,11 @@ async function sendText(text, input = "typed") {
   if (!res.ok) {
     $("messages").classList.remove("waiting");
     toast("Message not sent. Please try again.");
+    track("message_failed", { input, status: res.status });
     return;
   }
   addMessage((await res.json()).message);
+  track("message_sent", { input, view: voiceViewVisible() ? "voice" : "chat", in_call: !!state.voice, chars: text.length });
 }
 
 // ---------------------------------------------------------------- read-aloud (Flow 3)
@@ -206,9 +236,11 @@ async function readAloud(id, btn) {
   audio.dataset.id = id;
   state.audio = audio;
   btn.classList.add("playing");
+  const tapped = performance.now();
+  audio.addEventListener("playing", () => track("read_aloud_played", { start_ms: Math.round(performance.now() - tapped) }), { once: true });
   audio.onended = audio.onerror = () => {
     btn.classList.remove("playing");
-    if (audio.error) toast("Audio is unavailable for this reply.");
+    if (audio.error) { toast("Audio is unavailable for this reply."); track("read_aloud_failed", { code: audio.error.code }); }
     if (state.audio === audio) state.audio = null;
   };
   try { await audio.play(); } catch { btn.classList.remove("playing"); toast("Tap again to play audio."); }
@@ -251,6 +283,7 @@ async function addFiles(fileList) {
     const file = await shrinkImage(raw);
     if (file.size > maxBytes()) { toast(`${file.name} is larger than ${Math.round(maxBytes() / 1000000)} MB.`); continue; }
     state.pending.push({ id: crypto.randomUUID(), file, preview: isImage(file) ? URL.createObjectURL(file) : null });
+    track("attachment_added", { kind: isImage(file) ? "image" : "file", source: addFiles.source || "unknown", size_kb: Math.round(file.size / 1024), resized: file !== raw });
   }
   renderTray();
 }
@@ -339,9 +372,11 @@ async function sendAttachments(items) {
       if (!res.ok) {
         const detail = (await res.json().catch(() => ({}))).detail;
         toast(`${p.file.name} wasn't sent${detail ? `: ${detail}` : "."}`);
+        track("attachment_failed", { kind: p.preview ? "image" : "file", status: res.status });
         continue;
       }
       const { message } = await res.json();
+      track("attachment_sent", { kind: p.preview ? "image" : "file", size_kb: Math.round(p.file.size / 1024), view: voiceViewVisible() ? "voice" : "chat", in_call: !!state.voice });
       if (p.preview) state.previews.set(message.content.mediaUrl, p.preview); // show the local copy at once
       addMessage(message);
       if (voiceViewVisible()) {
@@ -412,6 +447,7 @@ async function shoot() {
   canvas.getContext("2d").drawImage(video, 0, 0);
   const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", 0.88));
   closeCamera();
+  addFiles.source = "webcam";
   if (blob) await addFiles([new File([blob], `photo-${Date.now()}.jpg`, { type: "image/jpeg" })]);
 }
 
@@ -446,8 +482,9 @@ async function toggleVoiceNote() {
     form.append("file", blob, `note.${blob.type.includes("mp4") ? "m4a" : "webm"}`);
     const res = await api("/v1/voice-notes", { method: "POST", body: form });
     $("input").placeholder = "Type a message";
-    if (!res.ok) { toast("Couldn't transcribe that note. Please try again or type."); return; }
-    const { transcript } = await res.json();
+    if (!res.ok) { toast("Couldn't transcribe that note. Please try again or type."); track("voice_note_failed", { status: res.status }); return; }
+    const { transcript, stt_ms } = await res.json();
+    track("voice_note_transcribed", { duration_s: Math.round((Date.now() - started) / 1000), stt_ms, empty: !transcript });
     if (!transcript) { toast("I didn't catch anything in that note."); return; }
     $("input").value = transcript;
     $("input").dataset.input = "voice_note";
@@ -494,11 +531,23 @@ class VoiceClient {
     this.player.port.onmessage = (e) => {
       if (e.data.type === "level") setOrbLevel(e.data.rms * 6);
       if (e.data.type === "drained") { this.playing = false; setVoiceState(this.state); }
-      if (e.data.type === "playing") { this.playing = true; setVoiceState("speaking"); }
+      if (e.data.type === "playing") {
+        this.playing = true;
+        this.playbackStartedAt = performance.now();
+        setVoiceState("speaking");
+        // Time from the end of the user's turn to the reply audibly playing on this device.
+        if (this.awaitingReply && this.turnEndedAt) {
+          track("voice_reply_heard", { heard_ms: Math.round(performance.now() - this.turnEndedAt), input: this.turnInput });
+          this.awaitingReply = false;
+        }
+      }
     };
 
     this.active = true;
     this.retryDelay = 500;
+    this.startedAt = performance.now();
+    this.turns = 0;
+    this.interruptions = 0;
     await this.openSocket();
   }
 
@@ -511,7 +560,8 @@ class VoiceClient {
     ws.onmessage = (e) => (typeof e.data === "string" ? this.onEvent(JSON.parse(e.data)) : this.onAudio(e.data));
     ws.onclose = (e) => {
       if (!this.active || this.ws !== ws) return;
-      if (e.code === 4401) { toast("Session expired. Reload the page."); stopVoice(); return; }
+      if (e.code === 4401) { toast("Session expired. Reload the page."); stopVoice("expired"); return; }
+      track("voice_reconnect", { code: e.code, after_s: Math.round((performance.now() - this.startedAt) / 1000) });
       setStatus("Voice · reconnecting…");
       this.speaking = false;
       setTimeout(() => this.active && this.openSocket().catch(() => {}), this.retryDelay);
@@ -550,6 +600,10 @@ class VoiceClient {
       this.above = rms > bargeThr ? this.above + 1 : 0;
       if (this.above >= 8) {
         this.bargeIn = true;
+        this.interruptions = (this.interruptions || 0) + 1;
+        // Barge-ins within ~0.5 s of playback starting are often the assistant hearing itself (echo).
+        const into = this.playbackStartedAt ? Math.round(performance.now() - this.playbackStartedAt) : null;
+        track("voice_barge_in", { ms_into_playback: into, likely_echo: into !== null && into < 500 });
         this.player.port.postMessage({ type: "clear" });
         this.send({ type: "interrupt" });
         this.beginSpeech();
@@ -572,8 +626,15 @@ class VoiceClient {
         this.bargeIn = false;
         this.below = 0;
         this.send({ type: "speech_end", hangover_ms: 500 });
+        this.markTurnEnd("voice", 500);
       }
     }
+  }
+
+  markTurnEnd(input, hangoverMs = 0) {
+    this.turnEndedAt = performance.now() - hangoverMs;
+    this.turnInput = input;
+    this.awaitingReply = true;
   }
 
   beginSpeech() {
@@ -615,11 +676,15 @@ class VoiceClient {
         break;
       case "audio_start":
         this.outCtx.resume();
+        if (ev.hold) this.heldReply = true;
         break;
       case "audio_stop":
         this.player.port.postMessage({ type: "clear" });
         break;
       case "metrics":
+        this.turns += 1;
+        track("voice_turn", { ...ev, type: undefined, held: !!this.heldReply });
+        this.heldReply = false;
         showMetrics(ev);
         $("timings").hidden = false;
         break;
@@ -630,7 +695,7 @@ class VoiceClient {
         toast(ev.text || "Something went wrong.");
         break;
       case "session_end":
-        if (ev.reason === "idle") { toast("Voice chat paused after inactivity."); stopVoice(); }
+        if (ev.reason === "idle") { toast("Voice chat paused after inactivity."); stopVoice("idle"); }
         // max_duration: the socket closes next and onclose reconnects.
         break;
     }
@@ -671,16 +736,27 @@ async function startVoice() {
     updateComposerButtons();
     await state.voice.start();
     setVoiceState("listening");
+    track("voice_call_started", {});
   } catch (err) {
     console.error(err);
     toast(err.name === "NotAllowedError" ? "Microphone access is needed for voice mode." : "Couldn't start voice chat.");
-    stopVoice();
+    track("voice_call_start_failed", { error: err.name || "Error", mic_denied: err.name === "NotAllowedError" });
+    stopVoice("start_failed");
   } finally {
     startVoice.busy = false;
   }
 }
 
-function stopVoice() {
+function stopVoice(reason = "user") {
+  const v = state.voice;
+  if (v && v.startedAt) {
+    track("voice_call_ended", {
+      reason: typeof reason === "string" ? reason : "user",
+      duration_s: Math.round((performance.now() - v.startedAt) / 1000),
+      turns: v.turns || 0,
+      interruptions: v.interruptions || 0,
+    });
+  }
   if (state.voice) state.voice.stop();
   state.voice = null;
   setVoiceState("idle");
@@ -692,6 +768,7 @@ function stopVoice() {
 
 // ---------------------------------------------------------------- UI wiring
 function showTab(name) {
+  if ($(`view-${name}`).hidden) track("view_switched", { to: name });
   for (const t of ["chat", "voice"]) {
     $(`tab-${t}`).setAttribute("aria-selected", String(t === name));
     $(`view-${t}`).hidden = t !== name;
@@ -723,6 +800,8 @@ function wire() {
     if (!text.trim()) return;
     if (state.voice && state.voice.ws && state.voice.ws.readyState === 1) {
       state.voice.send({ type: "text", text: text.trim() }); // spoken reply, same turn tracking as speech
+      state.voice.markTurnEnd("typed");
+      track("message_sent", { input: "typed", view: "voice", in_call: true, chars: text.trim().length });
     } else {
       await sendText(text, kind);
       if (voiceViewVisible()) { setCaption("user", text.trim()); setCaption("bot", ""); }
@@ -731,12 +810,12 @@ function wire() {
   $("input").addEventListener("input", () => { autoGrow(); updateComposerButtons(); });
   $("input").addEventListener("paste", (e) => {
     const files = Array.from(e.clipboardData?.files || []);
-    if (files.length) { e.preventDefault(); addFiles(files); }
+    if (files.length) { e.preventDefault(); addFiles.source = "paste"; addFiles(files); }
   });
   const chat = $("view-chat");
   chat.addEventListener("dragover", (e) => { if (e.dataTransfer?.types?.includes("Files")) { e.preventDefault(); chat.classList.add("dropping"); } });
   chat.addEventListener("dragleave", (e) => { if (e.target === chat) chat.classList.remove("dropping"); });
-  chat.addEventListener("drop", (e) => { e.preventDefault(); chat.classList.remove("dropping"); addFiles(e.dataTransfer.files); });
+  chat.addEventListener("drop", (e) => { e.preventDefault(); chat.classList.remove("dropping"); addFiles.source = "drop"; addFiles(e.dataTransfer.files); });
   // On phones "Files" asks for documents only, so iOS and Android open their file browser directly
   // instead of a photo-or-file chooser. Laptops keep images in the file dialog too.
   if (isTouch()) $("pick-files").accept = DOC_ACCEPT;
@@ -751,7 +830,7 @@ function wire() {
   $("menu-photos").addEventListener("click", () => { toggleMenu(false); $("pick-photos").click(); });
   $("menu-files").addEventListener("click", () => { toggleMenu(false); $("pick-files").click(); });
   for (const id of ["pick-camera", "pick-photos", "pick-files", "pick-ios"]) {
-    $(id).addEventListener("change", (e) => { addFiles(e.target.files); e.target.value = ""; });
+    $(id).addEventListener("change", (e) => { addFiles.source = id.replace("pick-", ""); addFiles(e.target.files); e.target.value = ""; });
   }
   $("camera-cancel").addEventListener("click", closeCamera);
   $("camera-dialog").addEventListener("close", stopCameraStream);
@@ -762,7 +841,7 @@ function wire() {
   });
   $("voice-mode-btn").addEventListener("click", () => startVoice());
   $("orb-btn").addEventListener("click", () => { if (!state.voice) startVoice(); });
-  $("end-btn").addEventListener("click", () => stopVoice());
+  $("end-btn").addEventListener("click", () => stopVoice("user"));
   $("input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("composer").requestSubmit(); }
   });
@@ -779,6 +858,7 @@ function wire() {
       v.send({ type: "speech_end", hangover_ms: 0 });
     }
     $("mute-btn").setAttribute("aria-pressed", String(v.muted));
+    track(v.muted ? "voice_muted" : "voice_unmuted", {});
     $("mute-btn").setAttribute("aria-label", v.muted ? "Unmute microphone" : "Mute microphone");
     $("voice-state").textContent = v.muted ? "Microphone muted" : STATE_LABELS[v.state];
   });
@@ -792,6 +872,9 @@ function fitViewport() {
   document.documentElement.style.setProperty("--app-h", `${Math.round(h)}px`);
   if (vv && vv.offsetTop > 0) window.scrollTo(0, 0);
 }
+
+window.addEventListener("error", (e) => track("client_error", { kind: "error", name: (e.error && e.error.name) || "Error" }));
+window.addEventListener("unhandledrejection", (e) => track("client_error", { kind: "promise", name: (e.reason && e.reason.name) || "Error" }));
 
 (async function main() {
   orb = new Orb($("orb"));

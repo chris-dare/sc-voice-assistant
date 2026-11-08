@@ -138,6 +138,7 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
             "mock": s.mock_providers,
             "access_code_required": bool(s.demo_access_code),
             "attachment_max_bytes": s.attachment_max_bytes,
+            "posthog": {"token": s.posthog_project_token, "api_host": s.posthog_api_host} if s.posthog_project_token else None,
         }
 
     # ------------------------------------------------------------------ text mode

@@ -33,26 +33,12 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
-import logfire
 from fastapi import WebSocket, WebSocketDisconnect
 
+from zigi_agent.rules import ZigiState, state_from_dict, state_to_dict
+
 from . import telemetry
-from .agent import (
-    SYSTEM_PROMPT,
-    TOOLS,
-    LLMError,
-    ZigiState,
-    host_allowed,
-    is_affirmative,
-    links_in,
-    mask_digits,
-    read_page,
-    shape_input,
-    state_prompt,
-    tool_result,
-    ungrounded_numbers,
-)
+from .agent_client import AgentServiceError
 from .bus import channel_for
 from .delivery import SeenSet
 from .services import Services, UserContext
@@ -67,12 +53,6 @@ _HAS_WORD = re.compile(r"[A-Za-z0-9]")
 # Transcripts made only of fillers or noise words are not a turn ("Uh, uh, uh").
 _FILLER = re.compile(r"^(?:\s|[.,!?…-])*(?:(?:uh|um+|uhm|hmm+|mm+|ah+|er+|eh|oh|huh|hm)(?:\s|[.,!?…-])*)+$", re.I)
 _PREROLL_BYTES = 16000  # 0.5 s of 16 kHz PCM16 kept before speech_start (batch mode)
-_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
-_UNGROUNDED_NOTE = "Your reply contained numbers or codes that did not come from ZIGI. Do not answer MTN facts yourself: call ask_zigi."
-_PUSH_NOTE = (
-    "ZIGI just sent the messages shown in ZIGI STATE without a new question from the customer "
-    "(for example a reply to a photo or file). Tell the customer briefly what ZIGI said."
-)
 
 
 @dataclass
@@ -116,7 +96,7 @@ class _State:
 class VoiceSession:
     def __init__(self, ws: WebSocket, svc: Services, ctx: UserContext, mode: str = "relay") -> None:
         self.ws = ws
-        self.mode = mode if mode == "agent" and svc.llm is not None and svc.settings.agent_configured else "relay"
+        self.mode = mode if mode == "agent" and svc.agent is not None and svc.settings.agent_configured else "relay"
         self.svc = svc
         self.cfg = svc.settings
         self.ctx = ctx
@@ -135,12 +115,12 @@ class VoiceSession:
         self._closed = False
         # agent mode
         self.zigi = ZigiState()
-        self.history: list[dict[str, Any]] = []
+        self.history: list[Any] = []  # the agent's message history, owned by the gateway between turns
         self.jobs: asyncio.Queue[tuple[str, Turn | None]] = asyncio.Queue()
         self.agent_task: asyncio.Task[None] | None = None
-        self.tool_inbox: asyncio.Queue[Message] | None = None
         self.push_buf: list[Message] = []
-        self.grounding: list[str] = []  # Zigi's and the user's words this call: what numbers may come from
+        self.zigi_seen: set[str] = set()  # Zigi messages the agent has already handled
+        self.grounding: list[str] = []  # Zigi's and the caller's words this call: what numbers may come from
 
     # ------------------------------------------------------------------ plumbing
     async def send(self, data: dict[str, Any]) -> None:
@@ -378,13 +358,12 @@ class VoiceSession:
             if not self.seen.add(msg.id):
                 continue
             turn = self.turn
+            if self.mode == "agent" and not (turn and turn.relay):
+                await self._agent_bot_message(msg)
+                continue
             if self.mode == "agent":
-                self.grounding.append(msg.text)
-                self.grounding.extend(str(a.get("text", "")) for a in msg.content.get("actions") or [])
-                if not (turn and turn.relay):
-                    await self._agent_bot_message(msg)
-                    continue
                 self.zigi.update((self.zigi.messages + [msg])[-6:])
+                self.grounding.append(msg.text)
             if turn and turn.t_bot_any is None:
                 turn.t_bot_any = time.monotonic()
             speech = render(msg.content)
@@ -396,27 +375,25 @@ class VoiceSession:
                 self.queue.put_nowait(SpeakItem(msg.id, speech, turn))
 
     async def _agent_bot_message(self, msg: Message) -> None:
-        """Agent mode: Zigi's message is data for the agent, shown in the chat but not spoken as is."""
+        """Agent mode: Zigi's message is shown in the chat; the agent service reads Zigi itself.
+
+        A message the agent has not seen and that arrives while no turn runs (e.g. the reply to a photo) is pushed
+        to the agent, which tells the caller.
+        """
         await self.send({"type": "bot_message", "message": msg.to_dict(), "speech": ""})
-        if self.tool_inbox is not None:
-            self.tool_inbox.put_nowait(msg)
-            return
         busy = (self.agent_task is not None and not self.agent_task.done()) or not self.jobs.empty()
-        if busy:
-            # A user turn is in progress: its next look at ZIGI STATE includes this message.
-            self.zigi.update((self.zigi.messages + [msg])[-6:])
+        if busy or msg.id in self.zigi_seen:
             return
-        # Unprompted (e.g. the reply to an attachment): let the agent tell the user.
         if not self.push_buf:
-            self.jobs.put_nowait(("zigi", None))
+            self.jobs.put_nowait(("push", None))
         self.push_buf.append(msg)
 
-    # ------------------------------------------------------------------ agent mode
+    # ------------------------------------------------------------------ agent mode (the agent service)
     async def _agent_worker(self) -> None:
         while True:
             kind, turn = await self.jobs.get()
-            if kind == "zigi" and not self.jobs.empty():
-                continue  # a user turn follows; it sees the update in ZIGI STATE
+            if kind == "push" and not self.jobs.empty():
+                continue  # a caller turn follows
             self.agent_task = asyncio.create_task(self._agent_job(kind, turn))
             await asyncio.wait({self.agent_task})
             self.agent_task = None
@@ -425,268 +402,92 @@ class VoiceSession:
 
     async def _agent_job(self, kind: str, turn: Turn | None) -> None:
         if kind == "user" and turn is not None:
-            await self._agent_turn(turn, [{"role": "user", "content": turn.text}])
+            await self._agent_turn(turn, "user")
             return
-        # Zigi pushed messages without a question: wait for the burst to finish, then relay it through the agent.
-        while True:
+        while True:  # let Zigi's burst finish
             n = len(self.push_buf)
             await asyncio.sleep(self.cfg.agent_quiet_s)
             if len(self.push_buf) == n:
                 break
-        burst = [m for m in self.push_buf if self.svc.speakable(m.text) or m.content.get("type") in {"image", "file"}]
+        burst = [
+            m
+            for m in self.push_buf
+            if m.id not in self.zigi_seen and (self.svc.speakable(m.text) or m.content.get("type") in {"image", "file"})
+        ]
         self.push_buf = []
         if not burst:
             return
         self.zigi.update(burst)
+        self.zigi_seen.update(m.id for m in burst)
+        self.grounding.extend(m.text for m in burst)
         push = Turn(id=uuid.uuid4().hex[:12], text="", t_speech_end=None, t_final=time.monotonic(), route="push", relay=False)
         self.turn = push
         await self.set_state("thinking")
-        await self._agent_turn(push, [{"role": "system", "content": _PUSH_NOTE}])
+        await self._agent_turn(push, "push")
 
-    def _agent_context(self) -> list[dict[str, Any]]:
-        keep = self.cfg.agent_history_turns * 2
-        return [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "system", "content": state_prompt(self.zigi)},
-            *self.history[-keep:],
-        ]
-
-    async def _agent_turn(self, turn: Turn, opening: list[dict[str, Any]]) -> None:
-        """One agent turn: up to four LLM rounds, with Zigi tool calls in between (design 5.8.1)."""
-        assert self.svc.llm is not None
-        msgs = self._agent_context() + opening
-        tool_choice: Any = None
-        used_tool = False
+    async def _agent_turn(self, turn: Turn, kind: str) -> None:
+        request = {
+            "conversation_id": self.ctx.conversation_id,
+            "sunco_user_id": self.ctx.sunco_user_id,
+            "kind": kind,
+            "text": turn.text,
+            "history": self.history,
+            "zigi_state": state_to_dict(self.zigi),
+            "grounding": self.grounding[-80:],
+        }
+        assert self.svc.agent is not None
+        stream = self.svc.agent.turn(request)
+        failed = False
         try:
-            for rnd in range(4):
-                text, calls, ungrounded = await self._llm_round(turn, msgs, rnd, tool_choice, strict=not used_tool)
-                tool_choice = None
-                if ungrounded:
-                    if used_tool or rnd >= 2:
-                        if not turn.spoken:
-                            await self._speak_raw(turn)  # nothing usable said: give Zigi's own words
-                        return
-                    log.warning("agent reply had numbers not from Zigi; asking Zigi instead")
-                    msgs.append(
-                        {
-                            "role": "system",
-                            "content": _UNGROUNDED_NOTE,
-                        }
-                    )
-                    tool_choice = {"type": "function", "function": {"name": "ask_zigi"}}
-                    continue
-                if not calls:
-                    return
-                used_tool = True
-                turn.route = "zigi" if turn.route != "push" else turn.route
-                msgs.append(
-                    {
-                        "role": "assistant",
-                        "content": text or None,
-                        "tool_calls": [
-                            {
-                                "id": c.id,
-                                "type": "function",
-                                "function": {"name": c.name, "arguments": c.raw_arguments or json.dumps(c.arguments)},
-                            }
-                            for c in calls
-                        ],
-                    }
-                )
-                if not turn.filler_spoken and not text.strip() and self.cfg.agent_hold_line:
-                    turn.filler_spoken = True
-                    self.queue.put_nowait(SpeakItem(f"hold-{turn.id}", self.cfg.agent_hold_line, turn, is_filler=True))
-                for call in calls:
-                    msgs.append({"role": "tool", "tool_call_id": call.id, "content": await self._run_tool(turn, call)})
-        except (LLMError, TimeoutError) as exc:
-            log.warning("agent turn failed (%s): %s", type(exc).__name__, exc)
-            if turn.spoken:
-                return
-            if used_tool or turn.route == "push":
-                await self._speak_raw(turn)
-            else:
-                turn.route, turn.relay = "fallback", True
-                await self._relay_post(turn, "voice")
-        finally:
-            said = " ".join(turn.spoken)
-            if turn.text:
-                self.history.append({"role": "user", "content": turn.text})
-            if said:
-                self.history.append({"role": "assistant", "content": said})
-
-    async def _llm_round(
-        self, turn: Turn, msgs: list[dict[str, Any]], rnd: int, tool_choice: Any, strict: bool
-    ) -> tuple[str, list[Any], bool]:
-        """Stream one LLM reply into speech. strict: an unsupported number ends the round (the agent must ask Zigi);
-        otherwise (after a Zigi call) only that sentence is dropped."""
-        assert self.svc.llm is not None
-        buf, text = "", ""
-        calls: list[Any] = []
-        stream = self.svc.llm.stream(msgs, TOOLS, tool_choice)
-        first = True
-        with logfire.span("agent llm round {round}", round=rnd, model=self.svc.llm.model, turn_id=turn.id) as span:
-            try:
-                while True:
-                    try:
-                        ev = await asyncio.wait_for(anext(stream), self.cfg.agent_first_token_timeout_s if first else 20)
-                    except StopAsyncIteration:
-                        break
-                    if first:
-                        first = False
-                        if turn.t_llm_first is None:
-                            turn.t_llm_first = time.monotonic()
-                    if ev.kind == "text":
-                        buf += ev.text
-                        text += ev.text
-                        *done, buf = _SENTENCE_END.split(buf)
-                        for sentence in done:
-                            if not await self._agent_say(turn, sentence):
-                                span.set_attribute("ungrounded", True)
-                                if strict:
-                                    return text, [], True
-                    elif ev.kind == "tool_calls":
-                        calls = ev.calls
-            finally:
-                with contextlib.suppress(Exception):
-                    await stream.aclose()
-            if buf.strip() and not await self._agent_say(turn, buf):
-                span.set_attribute("ungrounded", True)
-                if strict:
-                    return text, [], True
-            span.set_attribute("tools", [c.name for c in calls])
-        return text, calls, False
-
-    async def _agent_say(self, turn: Turn, sentence: str) -> bool:
-        sentence = sentence.strip()
-        if not sentence:
-            return True
-        if missing := ungrounded_numbers(sentence, self.grounding):
-            log.warning("dropped an agent sentence with ungrounded numbers %s", missing)
-            return False
-        speech = render({"type": "text", "text": sentence})
-        if not speech:
-            return True
-        turn.spoken.append(sentence)
-        await self.send({"type": "agent_text", "turn_id": turn.id, "text": sentence})
-        self.queue.put_nowait(SpeakItem(f"agent-{turn.id}-{len(turn.spoken)}", speech, turn))
-        return True
-
-    async def _speak_raw(self, turn: Turn) -> None:
-        """Fallback: say Zigi's last reply as relay mode would."""
-        turn.route = "fallback"
-        for m in self.zigi.messages:
-            speech = render(m.content)
-            if self.svc.speakable(m.text) and speech:
-                turn.spoken.append(m.text)
-                await self.send({"type": "agent_text", "turn_id": turn.id, "text": m.text})
-                self.queue.put_nowait(SpeakItem(m.id, speech, turn))
-
-    async def _run_tool(self, turn: Turn, call: Any) -> str:
-        waiting = self.zigi.waiting_for
-        if call.name == "read_link":
-            return await self._read_link(turn, str(call.arguments.get("url") or ""))
-        with logfire.span("tool {name}", name=call.name, waiting_for=waiting, turn_id=turn.id) as span:
-            content, refusal = self._tool_content(turn, call, waiting)
-            if refusal:
-                span.set_attribute("refused", True)
-                self.grounding.append(refusal)
-                return json.dumps({"error": refusal})
-            assert content is not None
-            t0 = time.monotonic()
-            self.tool_inbox = asyncio.Queue()
-            try:
+            while True:
+                timeout = self.cfg.agent_first_event_timeout_s if not turn.spoken else 60
                 try:
-                    posted = await self.svc.provider.post_content(
-                        self.ctx.conversation_id,
-                        self.ctx.sunco_user_id,
-                        content,
-                        {"channel": "voice", "source": "sc-voice-gateway", "input": "agent", "mode": "agent"},
-                    )
-                except SunCoError as exc:
-                    log.warning("agent post to SunCo failed: %s", exc)
-                    return json.dumps({"error": "ZIGI can't be reached right now. Tell the user to try again shortly."})
-                if turn.t_posted is None:
-                    turn.t_posted = time.monotonic()
-                self.seen.add(posted.id)
-                self.grounding.append(content.get("text", ""))
-                await self.send({"type": "user_message", "message": posted.to_dict()})
-                burst = await self._collect_burst(turn)
-            finally:
-                self.tool_inbox = None
-                turn.zigi_ms += time.monotonic() - t0
-            if burst:
-                self.zigi.update(burst)
-            span.set_attribute("messages", len(burst))
-            span.set_attribute("now_waiting_for", self.zigi.waiting_for)
-            return tool_result(burst, self.zigi.waiting_for, timed_out=not burst)
+                    event = await asyncio.wait_for(anext(stream), timeout)
+                except StopAsyncIteration:
+                    break
+                await self._on_agent_event(turn, event)
+                if event["type"] == "error":
+                    failed = True
+        except (AgentServiceError, TimeoutError) as exc:
+            log.warning("agent service turn failed: %s", type(exc).__name__)
+            failed = True
+        finally:
+            with contextlib.suppress(Exception):
+                await stream.aclose()
+        if failed and not turn.spoken and kind == "user" and not turn.t_posted:
+            turn.route, turn.relay = "fallback", True
+            await self._relay_post(turn, "voice")
 
-    async def _read_link(self, turn: Turn, url: str) -> str:
-        """read_link: only links Zigi sent in this call, and only on allowed hosts (AGENT_LINK_HOSTS)."""
-        url = url.strip().rstrip(".,;:")
-        with logfire.span("tool read_link", turn_id=turn.id, host=httpx.URL(url).host if url.startswith("http") else "") as span:
-            zigi_links = {u for t in self.grounding for u in links_in(t)}
-            if url not in zigi_links:
-                span.set_attribute("refused", "not_from_zigi")
-                return json.dumps({"error": "Only links that ZIGI sent in this call can be opened."})
-            if not host_allowed(url, self.cfg.agent_link_hosts):
-                span.set_attribute("refused", "host")
-                return json.dumps({"error": "That site can't be opened from here. Say what the link is for and that it's in the chat."})
-            t0 = time.monotonic()
-            result = await read_page(self.svc.http, url)
-            turn.zigi_ms += time.monotonic() - t0
-            span.set_attribute("ok", "error" not in result)
-            if "page_text" in result:
-                self.grounding.append(result["page_text"])
-            return json.dumps(result, ensure_ascii=False)
-
-    def _tool_content(self, turn: Turn, call: Any, waiting: str) -> tuple[dict[str, Any] | None, str | None]:
-        if call.name == "read_link":
-            return None, None
-        if call.name == "ask_zigi":
-            text, refusal = shape_input(str(call.arguments.get("text") or ""), waiting, turn.text)
-            if refusal or text is None:
-                return None, refusal or "Nothing to send."
-            if waiting in {"otp", "phone_number"}:
-                log.info("agent sends %s %s", waiting, mask_digits(text))
-            return {"type": "text", "text": text[:2000]}, None
-        if call.name == "choose_option":
-            want = str(call.arguments.get("option") or "").strip().lower()
-            options = self.zigi.options
-            pick = next((a for a in options if str(a["text"]).strip().lower() == want), None) or next(
-                (a for a in options if want and want in str(a["text"]).lower()), None
-            )
-            if pick is None:
-                names = ", ".join(str(a["text"]) for a in options) or "none"
-                return None, f"That is not one of ZIGI's options. The options are: {names}."
-            if waiting == "confirmation" and is_affirmative(str(pick["text"])) and not is_affirmative(turn.text):
-                return None, "The user has not said yes in this turn. Read ZIGI's question to the user and wait for their answer."
-            content: dict[str, Any] = {"type": "text", "text": str(pick["text"])}
-            if pick.get("payload"):
-                content["payload"] = pick["payload"]
-            return content, None
-        return None, f"Unknown tool {call.name}."
-
-    async def _collect_burst(self, turn: Turn) -> list[Message]:
-        """Zigi's reply: every message until a quiet gap after the first real one, or the bot timeout."""
-        assert self.tool_inbox is not None
-        burst: list[Message] = []
-        deadline = time.monotonic() + self.cfg.bot_timeout_s
-        while True:
-            wait = self.cfg.agent_quiet_s if burst else deadline - time.monotonic()
-            if wait <= 0:
-                break
-            try:
-                msg = await asyncio.wait_for(self.tool_inbox.get(), wait)
-            except TimeoutError:
-                break
-            if turn.t_bot_any is None:
-                turn.t_bot_any = time.monotonic()
-            if msg.content.get("type") == "text" and not self.svc.speakable(msg.text):
-                continue  # debug lines from the dev bot
-            if turn.t_bot_first is None:
-                turn.t_bot_first = time.monotonic()
-            burst.append(msg)
-        return burst
+    async def _on_agent_event(self, turn: Turn, event: dict[str, Any]) -> None:
+        kind = event.get("type")
+        if kind == "say":
+            text = str(event.get("text") or "")
+            speech = render({"type": "text", "text": text})
+            if turn.t_llm_first is None:
+                turn.t_llm_first = time.monotonic()
+            if not speech:
+                return
+            turn.spoken.append(text)
+            filler = bool(event.get("filler"))
+            turn.filler_spoken |= filler
+            await self.send({"type": "agent_text", "turn_id": turn.id, "text": text, "filler": filler})
+            item_id = f"{'hold' if filler else 'agent'}-{turn.id}-{len(turn.spoken)}"
+            self.queue.put_nowait(SpeakItem(item_id, speech, turn, is_filler=filler))
+        elif kind == "zigi_posted":
+            message = event["message"]
+            self.seen.add(message["id"])
+            turn.route = "zigi" if turn.route != "push" else turn.route
+            if turn.t_posted is None:
+                turn.t_posted = time.monotonic()
+            await self.send({"type": "user_message", "message": message})
+        elif kind == "done":
+            self.history = event.get("history") or []
+            self.zigi = state_from_dict(event.get("zigi_state"))
+            self.grounding = list(event.get("grounding") or [])[-80:]
+            self.zigi_seen.update(event.get("zigi_seen") or [])
+            turn.zigi_ms = (event.get("zigi_ms") or 0) / 1000
+            turn.route = event.get("route") or turn.route
+            await self._report(turn)
 
     # ------------------------------------------------------------------ speaking
     async def _speaker_loop(self) -> None:

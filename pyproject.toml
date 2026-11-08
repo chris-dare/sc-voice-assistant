@@ -7,6 +7,8 @@ dependencies = [
     "fastapi>=0.162.2",
     "httpx>=0.28.1",
     "logfire[fastapi,httpx]>=5.5.0",
+    "pydantic-ai-slim[logfire,openrouter,web-fetch]>=2.66",
+    "pydantic-evals>=2.66",
     "pydantic-settings>=2.16.2",
     "python-multipart>=0.0.33",
     "redis>=8.1.0",
@@ -36,4 +38,4 @@ testpaths = ["tests"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/conftest.py" = ["E402"]  # env must be cleared before app.main is imported
-"app/agent.py" = ["E501"]  # prompt and regex text reads better unwrapped
+"zigi_agent/*.py" = ["E501"]  # prompt and regex text reads better unwrapped

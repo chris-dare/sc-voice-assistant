@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     stt_vad_silence_s: float = 0.6
     # Telco vocabulary that helps STT spell plan and product names right.
     stt_keyterms: list[str] = Field(default_factory=lambda: ["data bundle", "airtime", "MoMo", "roaming", "USSD", "SIM", "PUK"])
-    tts_voice_id: str = "JBFqnCBsd6RMkjVDRZzb"
+    tts_voice_id: str = "JvYVKHK9a3ohjGBudnKo"  # Alex Oke: young, casual Nigerian English male (chosen 08 Nov)
     tts_model_voice: str = "eleven_flash_v2_5"  # lowest latency, voice mode
     tts_model_readaloud: str = "eleven_multilingual_v2"  # higher quality, read-aloud
     tts_sample_rate: int = 24000  # PCM for voice mode
@@ -75,19 +75,17 @@ class Settings(BaseSettings):
     def posthog_api_host(self) -> str:
         return "https://eu.i.posthog.com" if "eu" in self.posthog_region.lower() else "https://us.i.posthog.com"
 
-    # --- Agent mode (design 5.8): an LLM in front of SunCo, Zigi as its tool --------------
-    # Feature flag for the Agentic mode. OPENROUTER_API_KEY is only the credential for the LLM.
+    # --- Agentic mode (design 5.8): the Zigi agent service, Zigi as its tool ------------------
+    # Feature flag. The agent service has its own settings (zigi_agent/config.py).
     agent_mode_enabled: bool = False
+    # The separate agent service; empty runs the same service code in this process (local dev, tests).
+    agent_service_url: str = ""
+    agent_service_token: str = ""
+    # The LLM credential, used by the in-process agent only (the service reads its own).
     openrouter_api_key: str = ""
-    # Zigi's links the agent may open and read (read_link), by host and its subdomains.
-    agent_link_hosts: list[str] = Field(default_factory=lambda: ["mtn.com.gh"])
-    agent_base_url: str = "https://openrouter.ai/api/v1"
-    agent_model: str = "openai/gpt-6-luna"
-    agent_max_tokens: int = 300
-    agent_history_turns: int = 12
-    agent_first_token_timeout_s: float = 4.0  # no first word or tool call by then: relay this turn
-    agent_quiet_s: float = 1.2  # Zigi's reply burst is complete after this much silence
-    agent_hold_line: str = "Let me check that for you."
+    # Wait this long for the agent's first event (it has its own model fallback inside) before relaying the turn.
+    agent_first_event_timeout_s: float = 8.0
+    agent_quiet_s: float = 1.2  # a Zigi message burst that arrives on its own is complete after this much silence
     voice_mode_default: Literal["relay", "agent"] = "relay"
     # Client sends silence instead of mic audio while its VAD hears no speech (background noise stays out of STT).
     noise_gate: bool = True
@@ -96,7 +94,17 @@ class Settings(BaseSettings):
 
     @property
     def agent_configured(self) -> bool:
-        return self.agent_mode_enabled and (bool(self.openrouter_api_key) or self.mock_providers)
+        return self.agent_mode_enabled and bool(self.agent_service_url or self.openrouter_api_key or self.mock_providers)
+
+    @property
+    def agent_token(self) -> str:
+        """Bearer token for the agent service: AGENT_SERVICE_TOKEN, else derived from AUTH_SECRET as the service does."""
+        import hashlib
+        import hmac
+
+        if self.agent_service_token:
+            return self.agent_service_token
+        return hmac.new(self.auth_secret.encode(), b"zigi-agent-service", hashlib.sha256).hexdigest()
 
     # When set, /v1/session asks for this code (protects vendor credit on a public demo URL).
     demo_access_code: str = ""

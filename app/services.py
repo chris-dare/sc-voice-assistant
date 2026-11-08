@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from .agent import LLM, MockLLM, OpenRouterLLM
+from .agent_client import AgentClient, HTTPAgentClient, InProcessAgentClient
 from .auth import external_id_for
 from .bus import Bus, MemoryBus, RedisBus
 from .config import Settings
@@ -39,7 +39,7 @@ class Services:
     watcher: Poller | NoopWatcher
     cache: TTSCache
     http: httpx.AsyncClient
-    llm: LLM | None = None
+    agent: AgentClient | None = None
     webhook_seen: SeenSet = field(default_factory=SeenSet)
     skip_patterns: list[re.Pattern[str]] = field(default_factory=list)
     _users: dict[str, UserContext] = field(default_factory=dict)
@@ -63,6 +63,8 @@ class Services:
         return bool(stripped) and not any(p.search(stripped) for p in self.skip_patterns)
 
     async def aclose(self) -> None:
+        if self.agent is not None:
+            await self.agent.aclose()
         await self.watcher.close()
         await self.provider.aclose()
         await self.bus.close()
@@ -108,11 +110,12 @@ def build_services(settings: Settings) -> Services:
             max_concurrent=settings.tts_max_concurrent,
         )
 
-    llm: LLM | None = None
-    if settings.mock_providers:
-        llm = MockLLM()
-    elif settings.openrouter_api_key:
-        llm = OpenRouterLLM(settings.openrouter_api_key, settings.agent_model, settings.agent_base_url, http, settings.agent_max_tokens)
+    agent: AgentClient | None = None
+    if settings.agent_configured:
+        if settings.agent_service_url:
+            agent = HTTPAgentClient(settings.agent_service_url, settings.agent_token, http)
+        else:
+            agent = InProcessAgentClient(provider, mock=settings.mock_providers)
 
     bus: Bus = RedisBus(settings.redis_url) if settings.redis_url else MemoryBus()
     watcher: Poller | NoopWatcher
@@ -129,6 +132,6 @@ def build_services(settings: Settings) -> Services:
         watcher=watcher,
         cache=TTSCache(settings.tts_cache_items, settings.tts_cache_ttl_s, settings.redis_url),
         http=http,
-        llm=llm,
+        agent=agent,
         skip_patterns=[re.compile(p, re.IGNORECASE) for p in settings.speech_skip_patterns],
     )

@@ -37,7 +37,27 @@ When the bot is slow, the gateway speaks a holding phrase after 2.5 s (`HOLD_PRO
 The voice screen has a switch, shown when `AGENT_MODE_ENABLED=true` (the feature flag) and the LLM credential `OPENROUTER_API_KEY` is set. The choice is kept on the device.
 
 - **Chatbot relay** (`mode=relay`): every turn goes to Zigi as said, and Zigi's replies are spoken. Unchanged from before.
-- **Agentic** (`mode=agent`, design 5.8): an LLM (`AGENT_MODEL`, default `openai/gpt-6-luna` through OpenRouter) talks to the user and calls Zigi as a tool (`ask_zigi`, `choose_option`). With `read_link` it opens links Zigi sent (only those, only on `AGENT_LINK_HOSTS`, default `mtn.com.gh`) and says what the page says instead of the URL. It answers small talk itself, rewrites Zigi's replies for speech, and sends Zigi input in the exact form it expects (an OTP said in a sentence reaches Zigi as digits). Gateway code enforces the guardrails: spoken numbers must come from Zigi or the user, a yes is only forwarded when the user said yes, OTPs and phone numbers are normalised, and a slow or failed LLM turn falls back to chatbot relay. The agent's own replies are never posted to SunCo (they would reach Botpress).
+- **Agentic** (`mode=agent`, design 5.8): the Zigi agent service talks to the caller and uses Zigi as a tool. It answers small talk itself, rewrites Zigi's replies for speech, sends Zigi input in the exact form it expects (an OTP said in a sentence reaches Zigi as digits), and opens links Zigi sent (MTN hosts only) instead of reading URLs. A slow or failed agent turn falls back to chatbot relay. The agent's own replies are never posted to SunCo (they would reach Botpress).
+
+### The agent service (`zigi_agent/`)
+
+A separate service built on Pydantic AI. The gateway sends each turn with the call's state (history, Zigi state) and gets back an NDJSON stream of sentences to speak (`POST /v1/turn`, see `zigi_agent/turn.py`). With `AGENT_SERVICE_URL` empty the gateway runs the same code in-process (local dev, tests, and today's Vercel deploy).
+
+| Capability | What it does |
+| --- | --- |
+| `zigi` (Capability) | `ask_zigi`, `choose_option`; ZIGI STATE added to the instructions every step |
+| `WebFetch` | reads pages Zigi linked to; local, SSRF-safe, `AGENT_LINK_HOSTS` only |
+| `ZigiGuardrails` | before each tool call: OTP, phone and amount reduced to what Zigi expects, no "yes" the caller didn't give, only Zigi's links; refusals go back to the model as `ModelRetry` |
+| `ProcessHistory` | keeps the last `AGENT_HISTORY_MESSAGES` messages, cut on turn boundaries |
+| `ModelFallback` | `AGENT_FALLBACK_MODELS` when the main model errors or gives no first token within `AGENT_FIRST_EVENT_TIMEOUT_S` |
+
+Spoken sentences are checked as they stream: a number not said by Zigi or the caller is dropped (and, before any Zigi call, the agent is sent back to ask Zigi). Logfire traces every model and tool call with `include_content=False`, so call content stays out of logs. Persona: `zigi_agent/persona.py`.
+
+Evals (`pydantic_evals`, the real model against the scripted Zigi in `app/mocks.py`):
+
+```bash
+uv run python -m evals.agent_evals --repeat 3
+```
 
 Each turn's metrics carry `mode` and `route` (`relay`, `direct`, `zigi`, `fallback`, `push`), in Logfire and in PostHog `voice_turn`.
 
@@ -52,7 +72,9 @@ This SunCo app has private attachments: a `mediaUrl` needs the app key. `GET /v1
 | Path | Component in the design |
 | --- | --- |
 | `app/session.py` | Session Manager and Turn Coordinator (voice WebSocket), both modes |
-| `app/agent.py` | Agent mode: LLM client, instructions and tools, Zigi state, guardrails |
+| `app/agent_client.py` | Client for the agent service (HTTP or in-process) |
+| `zigi_agent/` | The agent service (Pydantic AI) |
+| `evals/` | Agent evals |
 | `app/sunco.py` | Conversation Client (SunCo v2) |
 | `app/delivery.py` | Webhook Receiver and polling fallback |
 | `app/stt.py`, `app/tts.py` | STT and TTS Adapters, read-aloud cache |

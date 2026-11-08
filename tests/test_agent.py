@@ -4,9 +4,18 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from app.agent import classify_waiting, host_allowed, is_affirmative, links_in, page_text, shape_input, spoken_digits, ungrounded_numbers
 from app.main import create_app
 from app.sunco import Message
+from zigi_agent.rules import (
+    classify_waiting,
+    host_allowed,
+    is_affirmative,
+    links_in,
+    page_text,
+    shape_input,
+    spoken_digits,
+    ungrounded_numbers,
+)
 
 from .conftest import mock_settings
 
@@ -96,7 +105,7 @@ def test_waiting_labels():
 # ------------------------------------------------------------------ the agent-mode session
 @pytest.fixture
 def agent_client():
-    with TestClient(create_app(mock_settings(agent_mode_enabled=True, agent_quiet_s=0.2, agent_hold_line="One moment."))) as c:
+    with TestClient(create_app(mock_settings(agent_mode_enabled=True, agent_quiet_s=0.2))) as c:
         yield c
 
 
@@ -125,7 +134,13 @@ def sent_to_zigi(events):
 
 
 def has_metrics(events):
-    return any(e["type"] == "metrics" for e in events)
+    """The turn is over: metrics sent, and the gateway is back to listening after them."""
+    seen = False
+    for e in events:
+        seen |= e["type"] == "metrics"
+        if seen and e["type"] == "state" and e["state"] == "listening":
+            return True
+    return False
 
 
 def test_config_offers_both_modes(agent_client):
@@ -146,7 +161,7 @@ def test_small_talk_is_answered_without_zigi(agent_client):
     with agent_client.websocket_connect(f"/v1/voice/session?token={token}&mode=agent") as ws:
         assert json.loads(ws.receive_text())["mode"] == "agent"
         ev = run_turn(ws, "Hi, how are you?", has_metrics)
-    assert "doing well" in said(ev)
+    assert "good, thanks" in said(ev)
     assert sent_to_zigi(ev) == []
     m = next(e for e in ev if e["type"] == "metrics")
     assert m["mode"] == "agent" and m["route"] == "direct" and m["bot_ms"] == 0

@@ -28,6 +28,25 @@
 
     <section id="view-chat" class="view" role="tabpanel" aria-labelledby="tab-chat">
       <ol id="messages" class="messages" aria-live="polite"></ol>
+    </section>
+
+    <section id="view-voice" class="view" role="tabpanel" aria-labelledby="tab-voice" hidden>
+      <div class="voice-stage">
+        <button type="button" id="orb-btn" class="orb-btn" aria-label="Start voice chat">
+          <canvas id="orb" class="orb" aria-hidden="true"></canvas>
+        </button>
+        <p id="voice-state" class="voice-state" aria-live="polite">Tap the orb to start talking</p>
+      </div>
+      <div class="captions" id="captions">
+        <div id="caption-user" class="caption user" aria-live="polite"></div>
+        <div id="caption-bot" class="caption bot" aria-live="polite"></div>
+      </div>
+      <details id="timings" class="timings" hidden>
+        <summary>Timings</summary>
+        <dl id="metrics" class="metrics" aria-label="Last turn timings"></dl>
+      </details>
+    </section>
+    <footer class="dock">
       <div id="note-hint" class="note-hint" hidden>Voice note transcribed. Check it, then send.</div>
       <div id="attach-tray" class="attach-tray" aria-label="Attachments to send" hidden></div>
       <form id="composer" class="composer" autocomplete="off">
@@ -44,6 +63,13 @@
         </button>
         <button type="button" id="voice-mode-btn" class="icon-btn round accent" aria-label="Start voice chat" title="Voice chat">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 9h2v6H7zM11 6h2v12h-2zM15 8h2v8h-2zM3 11h2v2H3zM19 11h2v2h-2z"/></svg>
+        </button>
+        <button type="button" id="mute-btn" class="icon-btn round" aria-pressed="false" aria-label="Mute microphone" title="Mute microphone" hidden>
+          <svg class="mic-on" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-2.08A7 7 0 0 0 19 12h-2Z"/></svg>
+          <svg class="mic-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28Zm-4.02.17c0-.06.02-.11.02-.17V5a3 3 0 0 0-5.98-.33l5.96 5.5ZM4.27 3 3 4.27l6 6V11a3 3 0 0 0 3 3c.23 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3Z"/></svg>
+        </button>
+        <button type="button" id="end-btn" class="icon-btn round end" aria-label="End voice chat" title="End voice chat" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18.3 5.71 12 12.01l-6.3-6.3-1.41 1.41 6.3 6.3-6.3 6.3 1.41 1.41 6.3-6.3 6.3 6.3 1.41-1.41-6.3-6.3 6.3-6.3z"/></svg>
         </button>
       </form>
       <div id="attach-menu" class="attach-menu" role="menu" aria-label="Add" hidden>
@@ -64,23 +90,7 @@
           <button type="button" id="camera-flip" class="pill-btn" aria-label="Switch camera">Flip</button>
         </div>
       </dialog>
-    </section>
-
-    <section id="view-voice" class="view" role="tabpanel" aria-labelledby="tab-voice" hidden>
-      <div class="voice-stage">
-        <div id="orb" class="orb" data-state="idle" aria-hidden="true"><div class="ring"></div><div class="core"></div></div>
-        <p id="voice-state" class="voice-state" aria-live="polite">Tap to start talking</p>
-        <p id="caption-user" class="caption user" aria-live="polite"></p>
-        <p id="caption-bot" class="caption bot" aria-live="polite"></p>
-      </div>
-      <div class="voice-controls">
-        <button id="voice-btn" class="voice-btn" aria-pressed="false">Start voice chat</button>
-        <button id="mute-btn" class="icon-btn" aria-pressed="false" aria-label="Mute microphone" title="Mute microphone" disabled>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-2.08A7 7 0 0 0 19 12h-2Z"/></svg>
-        </button>
-      </div>
-      <dl id="metrics" class="metrics" aria-label="Last turn timings"></dl>
-    </section>
+    </footer>
     <div id="toast" class="toast" role="status" hidden></div>
   </main>
   <script type="module" src="/static/app.js"></script>

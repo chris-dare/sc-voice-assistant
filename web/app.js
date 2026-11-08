@@ -1,5 +1,8 @@
 // Zigi voice POC client: chat with voice notes and read-aloud, plus a hands-free voice mode.
+import { Orb } from "./orb.js";
+
 const $ = (id) => document.getElementById(id);
+let orb = null;
 const state = { token: null, messages: new Map(), voice: null, audio: null, recorder: null, config: {}, pending: [], previews: new Map(), camera: null };
 
 // ---------------------------------------------------------------- session
@@ -162,7 +165,11 @@ async function loadHistory() {
 function openStream() {
   const es = new EventSource(`/v1/conversations/me/stream?token=${encodeURIComponent(state.token)}`);
   es.addEventListener("bot_message", (e) => {
-    addMessage(JSON.parse(e.data));
+    const m = JSON.parse(e.data);
+    addMessage(m);
+    if (!state.voice && voiceViewVisible() && m.content && m.content.text && !DEBUG_LINES.some((r) => r.test(m.content.text.trim()))) {
+      setCaption("bot", m.content.text, null, { append: true });
+    }
     $("messages").classList.remove("waiting");
   });
   es.onerror = () => setStatus("Reconnecting…");
@@ -290,8 +297,36 @@ function renderTray() {
 
 function updateComposerButtons() {
   const hasContent = $("input").value.trim().length > 0 || state.pending.length > 0;
+  const inCall = !!state.voice;
   $("send-btn").hidden = !hasContent;
-  $("voice-mode-btn").hidden = hasContent;
+  $("voice-mode-btn").hidden = hasContent || inCall;
+  $("mute-btn").hidden = !inCall;
+  $("end-btn").hidden = !inCall;
+  $("note-btn").hidden = inCall; // the mic is busy with the call
+  $("input").placeholder = inCall ? "Type while you talk" : "Ask Zigi";
+}
+
+function voiceViewVisible() { return !$("view-voice").hidden; }
+
+// The bot often sends several messages per turn: captions keep all of them until the user speaks or types again.
+function setCaption(which, text, thumb, { append = false } = {}) {
+  const el = $(which === "user" ? "caption-user" : "caption-bot");
+  if (append && text) {
+    const para = document.createElement("p");
+    para.textContent = text;
+    el.appendChild(para);
+    return;
+  }
+  el.textContent = "";
+  if (thumb) {
+    const img = document.createElement("img");
+    img.src = thumb;
+    img.alt = "";
+    img.className = "cap-thumb";
+    el.appendChild(img);
+  }
+  if (text) el.appendChild(document.createTextNode(text));
+  if (which === "bot") $("captions").scrollTop = 0;
 }
 
 async function sendAttachments(items) {
@@ -309,6 +344,11 @@ async function sendAttachments(items) {
       const { message } = await res.json();
       if (p.preview) state.previews.set(message.content.mediaUrl, p.preview); // show the local copy at once
       addMessage(message);
+      if (voiceViewVisible()) {
+        setCaption("user", p.preview ? "Photo sent" : `Sent ${p.file.name}`, p.preview);
+        setCaption("bot", "");
+        if (state.voice) setVoiceState("thinking");
+      }
     } catch {
       toast(`${p.file.name} wasn't sent. Check your connection.`);
     }
@@ -560,18 +600,18 @@ class VoiceClient {
         setVoiceState(this.playing ? "speaking" : ev.state);
         break;
       case "transcript_partial":
-        $("caption-user").textContent = ev.text;
+        setCaption("user", ev.text);
         break;
       case "transcript_final":
-        $("caption-user").textContent = ev.text;
-        $("caption-bot").textContent = "";
+        setCaption("user", ev.text);
+        setCaption("bot", "");
         break;
       case "user_message":
         addMessage(ev.message);
         break;
       case "bot_message":
         addMessage(ev.message);
-        if (ev.speech) $("caption-bot").textContent = ev.speech;
+        if (ev.speech) setCaption("bot", (ev.message.content && ev.message.content.text) || ev.speech, null, { append: true });
         break;
       case "audio_start":
         this.outCtx.resume();
@@ -581,6 +621,7 @@ class VoiceClient {
         break;
       case "metrics":
         showMetrics(ev);
+        $("timings").hidden = false;
         break;
       case "notice":
         toast(ev.text);
@@ -596,15 +637,16 @@ class VoiceClient {
   }
 }
 
-const STATE_LABELS = { idle: "Tap to start talking", listening: "Listening…", thinking: "Thinking…", speaking: "Speaking — talk to interrupt" };
+const STATE_LABELS = { idle: "Tap the orb to start talking", listening: "Listening…", thinking: "Thinking…", speaking: "Speaking — talk to interrupt" };
 
 function setVoiceState(s) {
-  $("orb").dataset.state = s;
+  if (orb) orb.setState(s);
   $("voice-state").textContent = STATE_LABELS[s] || s;
+  $("orb-btn").setAttribute("aria-label", s === "idle" ? "Start voice chat" : `Voice chat: ${STATE_LABELS[s] || s}`);
 }
 
 function setOrbLevel(level) {
-  $("orb").style.setProperty("--level", Math.min(1, Math.max(0, level)).toFixed(3));
+  if (orb) orb.setLevel(level);
 }
 
 function showMetrics(m) {
@@ -620,20 +662,21 @@ function showMetrics(m) {
 }
 
 async function startVoice() {
-  const btn = $("voice-btn");
-  btn.disabled = true;
+  if (state.voice || startVoice.busy) return;
+  startVoice.busy = true;
+  showTab("voice");
+  $("voice-state").textContent = "Connecting…";
   try {
     state.voice = new VoiceClient();
+    updateComposerButtons();
     await state.voice.start();
-    btn.textContent = "End voice chat";
-    btn.setAttribute("aria-pressed", "true");
-    $("mute-btn").disabled = false;
+    setVoiceState("listening");
   } catch (err) {
     console.error(err);
     toast(err.name === "NotAllowedError" ? "Microphone access is needed for voice mode." : "Couldn't start voice chat.");
     stopVoice();
   } finally {
-    btn.disabled = false;
+    startVoice.busy = false;
   }
 }
 
@@ -642,10 +685,8 @@ function stopVoice() {
   state.voice = null;
   setVoiceState("idle");
   setOrbLevel(0);
-  $("voice-btn").textContent = "Start voice chat";
-  $("voice-btn").setAttribute("aria-pressed", "false");
-  $("mute-btn").disabled = true;
   $("mute-btn").setAttribute("aria-pressed", "false");
+  updateComposerButtons();
   setStatus("Online");
 }
 
@@ -679,7 +720,13 @@ function wire() {
     renderTray();
     autoGrow();
     if (items.length) await sendAttachments(items);
-    if (text.trim()) await sendText(text, kind);
+    if (!text.trim()) return;
+    if (state.voice && state.voice.ws && state.voice.ws.readyState === 1) {
+      state.voice.send({ type: "text", text: text.trim() }); // spoken reply, same turn tracking as speech
+    } else {
+      await sendText(text, kind);
+      if (voiceViewVisible()) { setCaption("user", text.trim()); setCaption("bot", ""); }
+    }
   });
   $("input").addEventListener("input", () => { autoGrow(); updateComposerButtons(); });
   $("input").addEventListener("paste", (e) => {
@@ -713,18 +760,27 @@ function wire() {
     state.camera.facing = state.camera.facing === "user" ? "environment" : "user";
     try { await startCameraStream(); } catch { toast("No other camera found."); }
   });
-  $("voice-mode-btn").addEventListener("click", () => { showTab("voice"); if (!state.voice) startVoice(); });
+  $("voice-mode-btn").addEventListener("click", () => startVoice());
+  $("orb-btn").addEventListener("click", () => { if (!state.voice) startVoice(); });
+  $("end-btn").addEventListener("click", () => stopVoice());
   $("input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("composer").requestSubmit(); }
   });
   $("note-btn").addEventListener("click", toggleVoiceNote);
   $("recording").addEventListener("click", toggleVoiceNote);
-  $("voice-btn").addEventListener("click", () => (state.voice ? stopVoice() : startVoice()));
   $("mute-btn").addEventListener("click", () => {
     if (!state.voice) return;
-    state.voice.muted = !state.voice.muted;
-    $("mute-btn").setAttribute("aria-pressed", String(state.voice.muted));
-    $("voice-state").textContent = state.voice.muted ? "Microphone muted" : STATE_LABELS[state.voice.state];
+    const v = state.voice;
+    v.muted = !v.muted;
+    // Muting mid-sentence must end the utterance, or the gateway keeps waiting for the user and holds the reply.
+    if (v.muted && v.speaking) {
+      v.speaking = false;
+      v.bargeIn = false;
+      v.send({ type: "speech_end", hangover_ms: 0 });
+    }
+    $("mute-btn").setAttribute("aria-pressed", String(v.muted));
+    $("mute-btn").setAttribute("aria-label", v.muted ? "Unmute microphone" : "Mute microphone");
+    $("voice-state").textContent = v.muted ? "Microphone muted" : STATE_LABELS[v.state];
   });
 }
 
@@ -738,6 +794,7 @@ function fitViewport() {
 }
 
 (async function main() {
+  orb = new Orb($("orb"));
   fitViewport();
   window.visualViewport?.addEventListener("resize", fitViewport);
   window.visualViewport?.addEventListener("scroll", fitViewport);

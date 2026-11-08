@@ -51,6 +51,8 @@
       <input type="file" id="pick-camera" accept="image/*" capture="environment" hidden />
       <input type="file" id="pick-photos" accept="image/*" multiple hidden />
       <input type="file" id="pick-files" accept="image/*,.pdf,.txt,.csv,.doc,.docx,.xls,.xlsx,.ppt,.pptx" multiple hidden />
+      <!-- iPhone/iPad: one input that opens Apple's own sheet (Photo Library, Take Photo, Choose Files). -->
+      <input type="file" id="pick-ios" accept="image/*,.pdf,.txt,.csv,.doc,.docx,.xls,.xlsx,.ppt,.pptx" multiple hidden />
       <dialog id="camera-dialog" class="camera-dialog" aria-label="Take a photo">
         <video id="camera-video" playsinline autoplay muted></video>
         <div class="camera-actions">

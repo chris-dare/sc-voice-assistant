@@ -325,6 +325,10 @@ function toggleMenu(open) {
 }
 
 const isTouch = () => window.matchMedia("(pointer: coarse)").matches;
+// iOS always shows its own Photo Library / Take Photo / Choose Files sheet for any input that accepts images,
+// and web pages cannot open the photo library directly. So on iOS the + button opens that sheet in one tap.
+const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const DOC_ACCEPT = ".pdf,.txt,.csv,.doc,.docx,.xls,.xlsx,.ppt,.pptx," + [...DOC_TYPES].join(",");
 
 async function openCamera() {
   // Phones: the file input's capture attribute opens the native camera app.
@@ -686,13 +690,20 @@ function wire() {
   chat.addEventListener("dragover", (e) => { if (e.dataTransfer?.types?.includes("Files")) { e.preventDefault(); chat.classList.add("dropping"); } });
   chat.addEventListener("dragleave", (e) => { if (e.target === chat) chat.classList.remove("dropping"); });
   chat.addEventListener("drop", (e) => { e.preventDefault(); chat.classList.remove("dropping"); addFiles(e.dataTransfer.files); });
-  $("plus-btn").addEventListener("click", (e) => { e.stopPropagation(); toggleMenu(); });
+  // On phones "Files" asks for documents only, so iOS and Android open their file browser directly
+  // instead of a photo-or-file chooser. Laptops keep images in the file dialog too.
+  if (isTouch()) $("pick-files").accept = DOC_ACCEPT;
+  $("plus-btn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (isIOS()) { $("pick-ios").click(); return; }
+    toggleMenu();
+  });
   document.addEventListener("click", (e) => { if (!$("attach-menu").hidden && !$("attach-menu").contains(e.target)) toggleMenu(false); });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("attach-menu").hidden) { toggleMenu(false); $("plus-btn").focus(); } });
   $("menu-camera").addEventListener("click", () => { toggleMenu(false); openCamera(); });
   $("menu-photos").addEventListener("click", () => { toggleMenu(false); $("pick-photos").click(); });
   $("menu-files").addEventListener("click", () => { toggleMenu(false); $("pick-files").click(); });
-  for (const id of ["pick-camera", "pick-photos", "pick-files"]) {
+  for (const id of ["pick-camera", "pick-photos", "pick-files", "pick-ios"]) {
     $(id).addEventListener("change", (e) => { addFiles(e.target.files); e.target.value = ""; });
   }
   $("camera-cancel").addEventListener("click", closeCamera);

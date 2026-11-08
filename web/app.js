@@ -656,7 +656,7 @@ class VoiceClient {
     switch (ev.type) {
       case "ready":
         this.mode = ev.mode || "relay";
-        setStatus(`Voice · ${this.mode === "agent" ? "Smart" : "Direct"}${ev.stt_mode === "realtime" ? "" : " · batch STT"}`);
+        setStatus(`Voice · ${this.mode === "agent" ? "Agentic" : "Chatbot relay"}${ev.stt_mode === "realtime" ? "" : " · batch STT"}`);
         break;
       case "state":
         this.state = ev.state;
@@ -724,7 +724,7 @@ function showMetrics(m) {
   const fmt = (v) => (v == null ? "–" : typeof v === "string" ? v : v >= 1000 ? `${(v / 1000).toFixed(1)} s` : `${v} ms`);
   const rows = m.mode === "agent"
     ? [
-        ["Route", { direct: "Agent answered", zigi: "Asked Zigi", fallback: "Fallback to Direct", push: "Zigi update" }[m.route] || m.route],
+        ["Route", { direct: "Agent answered", zigi: "Asked Zigi", fallback: "Fell back to chatbot relay", push: "Zigi update" }[m.route] || m.route],
         ["Speech → text", m.stt_ms],
         ["Agent first word", m.llm_ms],
         ["Zigi", m.bot_ms],
@@ -748,7 +748,7 @@ function addAgentText(turnId, text) {
     li = document.createElement("li");
     li.className = "msg bot agent";
     li.dataset.turn = turnId;
-    li.innerHTML = '<div class="bubble"></div><span class="tag">Smart mode · spoken</span>';
+    li.innerHTML = '<div class="bubble"></div><span class="tag">Agentic · spoken</span>';
     $("messages").appendChild(li);
   }
   const bubble = li.querySelector(".bubble");
@@ -773,7 +773,7 @@ function setVoiceMode(mode, { user = false } = {}) {
     v.ws = null;
     v.openSocket().catch(() => toast("Couldn't switch mode. Try again."));
   }
-  toast(mode === "agent" ? "Smart mode: an agent answers small talk and asks Zigi for the rest." : "Direct mode: everything you say goes to Zigi.", 3000);
+  toast(mode === "agent" ? "Agentic: an agent answers small talk and asks Zigi for the rest." : "Chatbot relay: everything you say goes to Zigi.", 3000);
 }
 
 async function startVoice() {

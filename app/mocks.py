@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import math
+import re
 import struct
 import time
 import uuid
@@ -32,6 +33,7 @@ class MockSunCo:
         self._messages: dict[str, list[Message]] = defaultdict(list)
         self._clock = itertools.count()
         self._media: dict[str, tuple[bytes, str]] = {}
+        self._flow: dict[str, str] = {}  # conversation -> "otp" | "confirm": a strict, text-style purchase flow
 
     def _msg(self, conv: str, author: str, content: dict[str, Any], metadata: dict[str, Any] | None = None) -> Message:
         m = Message(
@@ -59,7 +61,32 @@ class MockSunCo:
 
     async def _reply(self, conv: str, text: str) -> None:
         await asyncio.sleep(self._delay)
-        lowered = text.lower()
+        lowered = text.lower().strip()
+        flow = self._flow.pop(conv, None)
+        if flow == "otp":
+            if lowered.isdigit() and 4 <= len(lowered) <= 8:
+                self._flow[conv] = "confirm"
+                self._msg(
+                    conv,
+                    "business",
+                    {
+                        "type": "text",
+                        "text": "Confirm purchase of 1GB for GH₵5? Reply YES or NO.",
+                        "actions": [{"type": "reply", "text": "Yes", "payload": "yes"}, {"type": "reply", "text": "No", "payload": "no"}],
+                    },
+                )
+            else:
+                self._flow[conv] = "otp"
+                self._msg(conv, "business", {"type": "text", "text": "Invalid OTP. Please enter only the digits of the OTP."})
+            return
+        if flow == "confirm":
+            done = "Done! 1GB has been added to your account." if lowered in {"yes", "y"} else "Okay, I've cancelled that purchase."
+            self._msg(conv, "business", {"type": "text", "text": done})
+            return
+        if re.search(r"\b(i want to|i'd like to|please) buy\b|\bpurchase\b", lowered):
+            self._flow[conv] = "otp"
+            self._msg(conv, "business", {"type": "text", "text": "To buy 1GB for GH₵5, please enter the OTP we sent to your number."})
+            return
         if lowered == "attachment":
             self._msg(conv, "business", {"type": "text", "text": "Thanks, I've received your attachment."})
             return
@@ -92,6 +119,8 @@ class MockSunCo:
         msg = self._msg(conversation_id, "user", content, metadata)
         if content.get("type") in {"image", "file"}:
             asyncio.get_running_loop().create_task(self._reply(conversation_id, "attachment"))
+        elif content.get("type") == "text":
+            asyncio.get_running_loop().create_task(self._reply(conversation_id, str(content.get("payload") or content.get("text") or "")))
         return msg
 
     async def upload_attachment(self, conversation_id: str, filename: str, data: bytes, content_type: str) -> dict[str, Any]:

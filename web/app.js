@@ -4,7 +4,7 @@ import { initAnalytics, identify, track } from "./analytics.js";
 
 const $ = (id) => document.getElementById(id);
 let orb = null;
-const state = { token: null, messages: new Map(), voice: null, audio: null, recorder: null, config: {}, pending: [], previews: new Map(), camera: null };
+const state = { voiceMode: "relay", token: null, messages: new Map(), voice: null, audio: null, recorder: null, config: {}, pending: [], previews: new Map(), camera: null };
 
 // ---------------------------------------------------------------- session
 // Asks for the access code in the page itself: window.prompt is blocked in some in-app browsers,
@@ -537,7 +537,7 @@ class VoiceClient {
         setVoiceState("speaking");
         // Time from the end of the user's turn to the reply audibly playing on this device.
         if (this.awaitingReply && this.turnEndedAt) {
-          track("voice_reply_heard", { heard_ms: Math.round(performance.now() - this.turnEndedAt), input: this.turnInput });
+          track("voice_reply_heard", { heard_ms: Math.round(performance.now() - this.turnEndedAt), input: this.turnInput, mode: this.mode });
           this.awaitingReply = false;
         }
       }
@@ -554,7 +554,8 @@ class VoiceClient {
   // Hosted on serverless functions, the socket closes at the function's time limit: reconnect quietly.
   openSocket() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${proto}://${location.host}/v1/voice/session?token=${encodeURIComponent(state.token)}`);
+    this.mode = state.voiceMode;
+    const ws = new WebSocket(`${proto}://${location.host}/v1/voice/session?token=${encodeURIComponent(state.token)}&mode=${this.mode}`);
     ws.binaryType = "arraybuffer";
     this.ws = ws;
     ws.onmessage = (e) => (typeof e.data === "string" ? this.onEvent(JSON.parse(e.data)) : this.onAudio(e.data));
@@ -654,7 +655,8 @@ class VoiceClient {
   onEvent(ev) {
     switch (ev.type) {
       case "ready":
-        setStatus(ev.stt_mode === "realtime" ? "Voice · live captions" : "Voice · batch STT");
+        this.mode = ev.mode || "relay";
+        setStatus(`Voice · ${this.mode === "agent" ? "Smart" : "Direct"}${ev.stt_mode === "realtime" ? "" : " · batch STT"}`);
         break;
       case "state":
         this.state = ev.state;
@@ -673,6 +675,10 @@ class VoiceClient {
       case "bot_message":
         addMessage(ev.message);
         if (ev.speech) setCaption("bot", (ev.message.content && ev.message.content.text) || ev.speech, null, { append: true });
+        break;
+      case "agent_text":
+        setCaption("bot", ev.text, null, { append: true });
+        addAgentText(ev.turn_id, ev.text);
         break;
       case "audio_start":
         this.outCtx.resume();
@@ -715,15 +721,59 @@ function setOrbLevel(level) {
 }
 
 function showMetrics(m) {
-  const fmt = (v) => (v == null ? "–" : v >= 1000 ? `${(v / 1000).toFixed(1)} s` : `${v} ms`);
-  const rows = [
-    ["Speech → text", m.stt_ms],
-    ["Bot reply", m.bot_ms],
-    ["TTS first byte", m.tts_first_byte_ms],
-    ["Gateway total (excl. bot)", m.gateway_ms],
-    ["End of speech → audio", m.total_ms],
-  ];
-  $("metrics").innerHTML = rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${fmt(v)}</dd></div>`).join("");
+  const fmt = (v) => (v == null ? "–" : typeof v === "string" ? v : v >= 1000 ? `${(v / 1000).toFixed(1)} s` : `${v} ms`);
+  const rows = m.mode === "agent"
+    ? [
+        ["Route", { direct: "Agent answered", zigi: "Asked Zigi", fallback: "Fallback to Direct", push: "Zigi update" }[m.route] || m.route],
+        ["Speech → text", m.stt_ms],
+        ["Agent first word", m.llm_ms],
+        ["Zigi", m.bot_ms],
+        ["First audio (incl. hold line)", m.first_audio_ms],
+        ["End of speech → answer audio", m.total_ms],
+      ]
+    : [
+        ["Speech → text", m.stt_ms],
+        ["Bot reply", m.bot_ms],
+        ["TTS first byte", m.tts_first_byte_ms],
+        ["Gateway total (excl. bot)", m.gateway_ms],
+        ["End of speech → audio", m.total_ms],
+      ];
+  $("metrics").innerHTML = rows.map(([k, v]) => `<div><dt>${escapeHtml(k)}</dt><dd>${escapeHtml(fmt(v))}</dd></div>`).join("");
+}
+
+// Agent mode: what the agent said, one bubble per turn, marked so it can't be mistaken for Zigi's own text.
+function addAgentText(turnId, text) {
+  let li = document.querySelector(`.msg.agent[data-turn="${CSS.escape(turnId)}"]`);
+  if (!li) {
+    li = document.createElement("li");
+    li.className = "msg bot agent";
+    li.dataset.turn = turnId;
+    li.innerHTML = '<div class="bubble"></div><span class="tag">Smart mode · spoken</span>';
+    $("messages").appendChild(li);
+  }
+  const bubble = li.querySelector(".bubble");
+  bubble.textContent = bubble.textContent ? `${bubble.textContent} ${text}` : text;
+  $("messages").scrollTop = $("messages").scrollHeight;
+}
+
+function setVoiceMode(mode, { user = false } = {}) {
+  if (!(state.config.voice_modes || ["relay"]).includes(mode)) mode = "relay";
+  const changed = mode !== state.voiceMode;
+  state.voiceMode = mode;
+  document.querySelectorAll("#mode-switch [data-mode]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.mode === mode)));
+  if (!user || !changed) return;
+  try { localStorage.setItem("voiceMode", mode); } catch {}
+  track("voice_mode_changed", { to: mode, in_call: !!state.voice });
+  // Mid-call: reconnect the socket in the new mode; the mic and audio stay open.
+  const v = state.voice;
+  if (v && v.ws) {
+    const old = v.ws;
+    old.onclose = null;
+    try { old.close(); } catch {}
+    v.ws = null;
+    v.openSocket().catch(() => toast("Couldn't switch mode. Try again."));
+  }
+  toast(mode === "agent" ? "Smart mode: an agent answers small talk and asks Zigi for the rest." : "Direct mode: everything you say goes to Zigi.", 3000);
 }
 
 async function startVoice() {
@@ -736,7 +786,7 @@ async function startVoice() {
     updateComposerButtons();
     await state.voice.start();
     setVoiceState("listening");
-    track("voice_call_started", {});
+    track("voice_call_started", { mode: state.voiceMode });
   } catch (err) {
     console.error(err);
     toast(err.name === "NotAllowedError" ? "Microphone access is needed for voice mode." : "Couldn't start voice chat.");
@@ -754,6 +804,7 @@ function stopVoice(reason = "user") {
       reason: typeof reason === "string" ? reason : "user",
       duration_s: Math.round((performance.now() - v.startedAt) / 1000),
       turns: v.turns || 0,
+      mode: v.mode || state.voiceMode,
       interruptions: v.interruptions || 0,
     });
   }
@@ -783,6 +834,7 @@ function autoGrow() {
 }
 
 function wire() {
+  document.querySelectorAll("#mode-switch [data-mode]").forEach((b) => b.addEventListener("click", () => setVoiceMode(b.dataset.mode, { user: true })));
   $("tab-chat").addEventListener("click", () => showTab("chat"));
   $("tab-voice").addEventListener("click", () => showTab("voice"));
   $("composer").addEventListener("submit", async (e) => {
@@ -886,6 +938,11 @@ window.addEventListener("unhandledrejection", (e) => track("client_error", { kin
   wire();
   try {
     await signIn();
+    const modes = state.config.voice_modes || ["relay"];
+    $("mode-switch").hidden = modes.length < 2;
+    let saved = null;
+    try { saved = localStorage.getItem("voiceMode"); } catch {}
+    setVoiceMode(saved || state.config.voice_mode_default || "relay");
     await loadHistory();
     openStream();
     setStatus(state.config.mock ? "Online · mock providers" : "Online");

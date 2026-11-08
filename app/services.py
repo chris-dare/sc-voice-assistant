@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from .agent import LLM, MockLLM, OpenRouterLLM
 from .auth import external_id_for
 from .bus import Bus, MemoryBus, RedisBus
 from .config import Settings
@@ -38,6 +39,7 @@ class Services:
     watcher: Poller | NoopWatcher
     cache: TTSCache
     http: httpx.AsyncClient
+    llm: LLM | None = None
     webhook_seen: SeenSet = field(default_factory=SeenSet)
     skip_patterns: list[re.Pattern[str]] = field(default_factory=list)
     _users: dict[str, UserContext] = field(default_factory=dict)
@@ -106,6 +108,12 @@ def build_services(settings: Settings) -> Services:
             max_concurrent=settings.tts_max_concurrent,
         )
 
+    llm: LLM | None = None
+    if settings.mock_providers:
+        llm = MockLLM()
+    elif settings.openrouter_api_key:
+        llm = OpenRouterLLM(settings.openrouter_api_key, settings.agent_model, settings.agent_base_url, http, settings.agent_max_tokens)
+
     bus: Bus = RedisBus(settings.redis_url) if settings.redis_url else MemoryBus()
     watcher: Poller | NoopWatcher
     if settings.sunco_delivery == "poll" or settings.mock_providers:
@@ -121,5 +129,6 @@ def build_services(settings: Settings) -> Services:
         watcher=watcher,
         cache=TTSCache(settings.tts_cache_items, settings.tts_cache_ttl_s, settings.redis_url),
         http=http,
+        llm=llm,
         skip_patterns=[re.compile(p, re.IGNORECASE) for p in settings.speech_skip_patterns],
     )

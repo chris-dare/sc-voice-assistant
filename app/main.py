@@ -139,6 +139,8 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
             "access_code_required": bool(s.demo_access_code),
             "attachment_max_bytes": s.attachment_max_bytes,
             "posthog": {"token": s.posthog_project_token, "api_host": s.posthog_api_host} if s.posthog_project_token else None,
+            "voice_modes": ["relay", "agent"] if s.agent_configured else ["relay"],
+            "voice_mode_default": s.voice_mode_default if s.agent_configured else "relay",
         }
 
     # ------------------------------------------------------------------ text mode
@@ -316,7 +318,7 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
 
     # ------------------------------------------------------------------ voice mode
     @app.websocket("/v1/voice/session")
-    async def voice(ws: WebSocket, token: str = "") -> None:
+    async def voice(ws: WebSocket, token: str = "", mode: str = "") -> None:
         s: Services = get_svc(ws.app)
         try:
             user_id = verify_token(s.settings.auth_secret, token)
@@ -330,8 +332,9 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
             await ws.send_text(json.dumps({"type": "error", "code": "unavailable", "text": "Conversation service unavailable."}))
             await ws.close(code=1011)
             return
-        with logfire.span("voice session {conversation_id}", conversation_id=ctx.conversation_id):
-            await VoiceSession(ws, s, ctx).run()
+        session = VoiceSession(ws, s, ctx, mode or s.settings.voice_mode_default)
+        with logfire.span("voice session {conversation_id}", conversation_id=ctx.conversation_id, mode=session.mode):
+            await session.run()
         with contextlib.suppress(Exception):
             await ws.close()
 

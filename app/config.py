@@ -74,6 +74,22 @@ class Settings(BaseSettings):
     @property
     def posthog_api_host(self) -> str:
         return "https://eu.i.posthog.com" if "eu" in self.posthog_region.lower() else "https://us.i.posthog.com"
+
+    # --- Agent mode (design 5.8): an LLM in front of SunCo, Zigi as its tool --------------
+    openrouter_api_key: str = ""
+    agent_base_url: str = "https://openrouter.ai/api/v1"
+    agent_model: str = "openai/gpt-6-luna"
+    agent_max_tokens: int = 300
+    agent_history_turns: int = 12
+    agent_first_token_timeout_s: float = 4.0  # no first word or tool call by then: relay this turn
+    agent_quiet_s: float = 1.2  # Zigi's reply burst is complete after this much silence
+    agent_hold_line: str = "Let me check that for you."
+    voice_mode_default: Literal["relay", "agent"] = "relay"
+
+    @property
+    def agent_configured(self) -> bool:
+        return bool(self.openrouter_api_key) or self.mock_providers
+
     # When set, /v1/session asks for this code (protects vendor credit on a public demo URL).
     demo_access_code: str = ""
 

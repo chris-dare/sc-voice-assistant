@@ -31,6 +31,10 @@
     </section>
 
     <section id="view-voice" class="view" role="tabpanel" aria-labelledby="tab-voice" hidden>
+      <div id="mode-switch" class="mode-switch" role="radiogroup" aria-label="Voice assistant mode" hidden>
+        <button type="button" role="radio" data-mode="relay" aria-checked="true" title="Every turn goes to Zigi as said">Direct</button>
+        <button type="button" role="radio" data-mode="agent" aria-checked="false" title="An agent answers small talk and asks Zigi for the rest">Smart</button>
+      </div>
       <div class="voice-stage">
         <button type="button" id="orb-btn" class="orb-btn" aria-label="Start voice chat">
           <canvas id="orb" class="orb" aria-hidden="true"></canvas>

@@ -166,6 +166,18 @@ h1 { font-size: 17px; margin: 0; font-weight: 800; letter-spacing: -0.01em; }
 .recording .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--danger); animation: pulse 1s infinite; flex: none; }
 
 /* voice */
+.mode-switch {
+  flex: none; display: flex; gap: 2px; margin: 10px auto 0; padding: 3px; border-radius: 999px;
+  background: var(--surface-3); width: max-content;
+}
+.mode-switch[hidden] { display: none; }
+.mode-switch button {
+  border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 13px; font-weight: 700;
+  padding: 6px 16px; border-radius: 999px; min-height: 32px; cursor: pointer;
+}
+.mode-switch button[aria-checked="true"] { background: var(--mtn-black); color: var(--mtn-yellow); }
+.msg.agent .bubble { border: 1px dashed var(--muted); }
+.msg .tag { display: block; font-size: 11px; color: var(--muted); margin: 2px 4px 0; }
 .voice-stage {
   flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 6px; padding: 8px 16px 0; text-align: center; min-height: 150px;

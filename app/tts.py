@@ -76,17 +76,30 @@ class TTSCache:
         self._ttl = ttl_s
         self._mem: OrderedDict[str, tuple[float, bytes, str]] = OrderedDict()
         self._redis = None
+        self._url = redis_url
         if redis_url:
-            import redis.asyncio as redis
+            from . import redisconn
 
-            self._redis = redis.from_url(redis_url)
+            self._redis = redisconn.client(redis_url)
+
+    async def _up(self) -> bool:
+        if self._redis is None or self._url is None:
+            return False
+        from . import redisconn
+
+        return await redisconn.available(self._url, self._redis)
 
     async def get(self, key: str) -> tuple[bytes, str] | None:
-        if self._redis is not None:
-            data = await self._redis.hgetall(f"tts:{key}")
-            if data:
-                return data[b"audio"], data[b"type"].decode()
-            return None
+        if await self._up():
+            try:
+                data = await self._redis.hgetall(f"tts:{key}")  # type: ignore[union-attr]
+                if data:
+                    return data[b"audio"], data[b"type"].decode()
+                return None
+            except Exception as exc:  # noqa: BLE001
+                from . import redisconn
+
+                redisconn.mark_down(self._url or "", exc)
         hit = self._mem.get(key)
         if not hit:
             return None
@@ -98,10 +111,15 @@ class TTSCache:
         return audio, ctype
 
     async def put(self, key: str, audio: bytes, content_type: str) -> None:
-        if self._redis is not None:
-            await self._redis.hset(f"tts:{key}", mapping={"audio": audio, "type": content_type})
-            await self._redis.expire(f"tts:{key}", self._ttl)
-            return
+        if await self._up():
+            try:
+                await self._redis.hset(f"tts:{key}", mapping={"audio": audio, "type": content_type})  # type: ignore[union-attr]
+                await self._redis.expire(f"tts:{key}", self._ttl)  # type: ignore[union-attr]
+                return
+            except Exception as exc:  # noqa: BLE001
+                from . import redisconn
+
+                redisconn.mark_down(self._url or "", exc)
         self._mem[key] = (time.monotonic() + self._ttl, audio, content_type)
         self._mem.move_to_end(key)
         while len(self._mem) > self._max:
@@ -109,7 +127,10 @@ class TTSCache:
 
     async def close(self) -> None:
         if self._redis is not None:
-            await self._redis.aclose()
+            try:
+                await self._redis.aclose()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def content_type_for(output_format: str) -> str:

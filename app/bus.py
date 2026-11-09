@@ -58,18 +58,39 @@ class MemoryBus:
 
 
 class RedisBus:
-    def __init__(self, url: str) -> None:
-        import redis.asyncio as redis
+    """Redis pub/sub when reachable; a process-local MemoryBus if it is not (see app/redisconn.py)."""
 
-        self._redis = redis.from_url(url)
+    def __init__(self, url: str) -> None:
+        from . import redisconn
+
+        self._rc = redisconn
+        self._url = url
+        self._redis = redisconn.client(url)
+        self._mem = MemoryBus()
 
     async def publish(self, channel: str, data: dict[str, Any]) -> None:
-        await self._redis.publish(channel, json.dumps(data))
+        if await self._rc.available(self._url, self._redis):
+            try:
+                await self._redis.publish(channel, json.dumps(data))
+                return
+            except Exception as exc:  # noqa: BLE001
+                self._rc.mark_down(self._url, exc)
+        await self._mem.publish(channel, data)
 
     @contextlib.asynccontextmanager
     async def subscribe(self, channel: str) -> AsyncIterator[AsyncIterator[dict[str, Any]]]:
-        pubsub = self._redis.pubsub()
-        await pubsub.subscribe(channel)
+        pubsub = None
+        if await self._rc.available(self._url, self._redis):
+            try:
+                pubsub = self._redis.pubsub()
+                await pubsub.subscribe(channel)
+            except Exception as exc:  # noqa: BLE001
+                self._rc.mark_down(self._url, exc)
+                pubsub = None
+        if pubsub is None:
+            async with self._mem.subscribe(channel) as messages:
+                yield messages
+            return
 
         async def messages() -> AsyncIterator[dict[str, Any]]:
             async for msg in pubsub.listen():

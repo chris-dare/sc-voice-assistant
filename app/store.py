@@ -58,27 +58,55 @@ class MemoryStore:
 
 
 class RedisStore:
-    def __init__(self, url: str) -> None:
-        import redis.asyncio as redis
+    """Redis when reachable; in-process memory if it is not (see app/redisconn.py)."""
 
-        self._redis = redis.from_url(url)
+    def __init__(self, url: str) -> None:
+        from . import redisconn
+
+        self._rc = redisconn
+        self._url = url
+        self._redis = redisconn.client(url)
+        self._mem = MemoryStore()
+
+    async def _up(self) -> bool:
+        return await self._rc.available(self._url, self._redis)
 
     async def get_json(self, key: str) -> Any | None:
-        raw = await self._redis.get(key)
-        return None if raw is None else json.loads(raw)
+        if await self._up():
+            try:
+                raw = await self._redis.get(key)
+                return None if raw is None else json.loads(raw)
+            except Exception as exc:  # noqa: BLE001
+                self._rc.mark_down(self._url, exc)
+        return await self._mem.get_json(key)
 
     async def set_json(self, key: str, value: Any, ttl_s: int) -> None:
-        await self._redis.set(key, json.dumps(value, ensure_ascii=False), ex=ttl_s)
+        if await self._up():
+            try:
+                await self._redis.set(key, json.dumps(value, ensure_ascii=False), ex=ttl_s)
+                return
+            except Exception as exc:  # noqa: BLE001
+                self._rc.mark_down(self._url, exc)
+        await self._mem.set_json(key, value, ttl_s)
 
     async def incr(self, key: str, amount: int, ttl_s: int) -> int:
-        pipe = self._redis.pipeline()
-        pipe.incrby(key, amount)
-        pipe.expire(key, ttl_s, nx=True)
-        value, _ = await pipe.execute()
-        return int(value)
+        if await self._up():
+            try:
+                pipe = self._redis.pipeline()
+                pipe.incrby(key, amount)
+                pipe.expire(key, ttl_s, nx=True)
+                value, _ = await pipe.execute()
+                return int(value)
+            except Exception as exc:  # noqa: BLE001
+                self._rc.mark_down(self._url, exc)
+        return await self._mem.incr(key, amount, ttl_s)
 
     async def close(self) -> None:
-        await self._redis.aclose()
+        await self._mem.close()
+        try:
+            await self._redis.aclose()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def build_store(redis_url: str | None) -> Store:

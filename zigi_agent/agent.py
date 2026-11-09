@@ -128,6 +128,9 @@ async def _collect_burst(deps: CallDeps, posted: Message, sub: AsyncIterator[dic
     deadline = start + cfg.zigi_timeout_s
     last_new = last_any = 0.0
     use_bus = sub is not None
+    # A new customer gets Zigi's greeting first and the real answer 10 to 15 s later (seen 09 Nov: the agent gave up
+    # 8 s after the greeting and answered "What is MoMo?" without Zigi). Only stop early when we just said hi.
+    greeting_only = len(str(posted.content.get("text") or "").split()) <= 3
     while time.monotonic() < deadline:
         candidates: list[Message] = []
         if use_bus:
@@ -159,8 +162,10 @@ async def _collect_burst(deps: CallDeps, posted: Message, sub: AsyncIterator[dic
                 last_new = time.monotonic()  # the quiet window starts after Zigi's real answer, not its greeting
         if last_new and time.monotonic() - last_new >= cfg.zigi_quiet_s:
             break
-        if burst and not last_new and time.monotonic() - last_any >= 8.0:
-            break  # only a greeting came back (e.g. the caller just said hi to Zigi)
+        if burst and not last_new and greeting_only and time.monotonic() - last_any >= 8.0:
+            break  # we only said hi, and only Zigi's greeting came back
+    if burst and not last_new:
+        logfire.warn("Zigi sent only its greeting before the timeout")
     return burst
 
 

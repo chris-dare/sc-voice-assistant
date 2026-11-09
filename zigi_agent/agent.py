@@ -109,10 +109,19 @@ async def _after_post(deps: CallDeps, content: dict[str, Any], posted: Message, 
             deps.grounding.append(m.text)
             deps.grounding.extend(str(a.get("text", "")) for a in m.content.get("actions") or [])
     answer = [m for m in burst if not deps.is_preamble(m.text)]
-    result = json.loads(tool_result(answer, deps.zigi.waiting_for, timed_out=not burst))
-    if len(answer) < len(burst):
+    result = json.loads(tool_result(answer, deps.zigi.waiting_for, timed_out=not answer))
+    if not answer:
+        # Its answer will still arrive and is then spoken as a follow-up (push turn).
+        result["note"] = (
+            "ZIGI hasn't answered yet. Don't answer from your own knowledge. Tell the caller, briefly, that it's taking "
+            "a little longer and you'll tell them as soon as you have it."
+        )
+    elif len(answer) < len(burst):
         result["note"] = "ZIGI also sent its standard greeting and privacy notice; it is in the chat. Don't read it out."
     return json.dumps(result, ensure_ascii=False)
+
+
+_HELLO = re.compile(r"(hi|hello|hey|hiya|good (morning|afternoon|evening)|yo|howdy)( there| zigi)?")
 
 
 async def _collect_burst(deps: CallDeps, posted: Message, sub: AsyncIterator[dict[str, Any]] | None = None) -> list[Message]:
@@ -130,7 +139,7 @@ async def _collect_burst(deps: CallDeps, posted: Message, sub: AsyncIterator[dic
     use_bus = sub is not None
     # A new customer gets Zigi's greeting first and the real answer 10 to 15 s later (seen 09 Nov: the agent gave up
     # 8 s after the greeting and answered "What is MoMo?" without Zigi). Only stop early when we just said hi.
-    greeting_only = len(str(posted.content.get("text") or "").split()) <= 3
+    greeting_only = bool(_HELLO.fullmatch(str(posted.content.get("text") or "").strip().lower().rstrip("!.?")))
     while time.monotonic() < deadline:
         candidates: list[Message] = []
         if use_bus:

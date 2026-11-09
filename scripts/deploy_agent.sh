@@ -10,7 +10,7 @@ stage=$(mktemp -d); trap 'rm -rf "$stage"' EXIT
 cp -r app zigi_agent uv.lock .python-version pyproject.toml "$stage/"
 find "$stage" -name __pycache__ -prune -exec rm -rf {} +
 printf 'from zigi_agent.service import app  # Vercel entrypoint for the agent service\n\n__all__ = ["app"]\n' > "$stage/index.py"
-printf '{\n  "$schema": "https://openapi.vercel.sh/vercel.json",\n  "functions": { "index.py": { "maxDuration": 120 } }\n}\n' > "$stage/vercel.json"
+printf '{\n  "$schema": "https://openapi.vercel.sh/vercel.json",\n  "regions": ["lhr1"],\n  "functions": { "index.py": { "maxDuration": 120 } }\n}\n' > "$stage/vercel.json"
 printf '.venv\n__pycache__\n.vercel\n.env*\n' > "$stage/.vercelignore"
 mkdir -p "$stage/.vercel"
 printf '{"projectId":"prj_CAblapTtEsyPTWFMTkz0QiDAWYW9","orgId":"team_cvWj5Ypdb1ztf2raeoxgxJzS","projectName":"sc-voice-agent"}' > "$stage/.vercel/project.json"

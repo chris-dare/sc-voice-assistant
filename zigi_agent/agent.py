@@ -121,37 +121,83 @@ async def _after_post(deps: CallDeps, content: dict[str, Any], posted: Message, 
     return json.dumps(result, ensure_ascii=False)
 
 
+_BACKUP_POLL_S = 2.5
 _HELLO = re.compile(r"(hi|hello|hey|hiya|good (morning|afternoon|evening)|yo|howdy)( there| zigi)?")
 
 
 async def _collect_burst(deps: CallDeps, posted: Message, sub: AsyncIterator[dict[str, Any]] | None = None) -> list[Message]:
     """Zigi's reply: new bot messages after ours, until a quiet gap after the first real one (or the timeout).
 
-    With a bus subscription (REDIS_URL set; the gateway's webhook or poller publishes Zigi's messages) the agent just
-    listens, which takes SunCo polling off the hot path. If the bus stays silent for 8 s it falls back to polling.
+    With a bus subscription (REDIS_URL set; the gateway's webhook or poller publishes Zigi's messages) the agent
+    listens, with a slow SunCo poll as a backup in case a message misses the channel.
     """
     cfg = deps.settings
     seen = {posted.id}
     burst: list[Message] = []
     start = time.monotonic()
     deadline = start + cfg.zigi_timeout_s
-    last_new = last_any = 0.0
-    use_bus = sub is not None
     # A new customer gets Zigi's greeting first and the real answer 10 to 15 s later (seen 09 Nov: the agent gave up
     # 8 s after the greeting and answered "What is MoMo?" without Zigi). Only stop early when we just said hi.
     greeting_only = bool(_HELLO.fullmatch(str(posted.content.get("text") or "").strip().lower().rstrip("!.?")))
+    last_poll = time.monotonic()
+    use_bus = sub is not None
+    inbox: asyncio.Queue[Any] = asyncio.Queue()
+
+    async def pump() -> None:
+        assert sub is not None
+        try:
+            async for item in sub:
+                inbox.put_nowait(item)
+        except Exception as exc:  # noqa: BLE001
+            inbox.put_nowait(exc)
+
+    pumping = asyncio.create_task(pump()) if sub is not None else None
+    try:
+        return await _gather(deps, posted, cfg, seen, burst, start, deadline, last_poll, use_bus, inbox, greeting_only)
+    finally:
+        if pumping is not None:
+            pumping.cancel()
+
+
+async def _gather(  # noqa: PLR0913
+    deps: CallDeps,
+    posted: Message,
+    cfg: AgentSettings,
+    seen: set[str],
+    burst: list[Message],
+    start: float,
+    deadline: float,
+    last_poll: float,
+    use_bus: bool,
+    inbox: asyncio.Queue[Any],
+    greeting_only: bool,
+) -> list[Message]:
+    last_new = last_any = 0.0
     while time.monotonic() < deadline:
         candidates: list[Message] = []
         if use_bus:
-            assert sub is not None
-            wait = cfg.zigi_quiet_s / 2 if last_any else max(0.1, min(deadline - time.monotonic(), 8.0))
+            wait = max(0.1, min(cfg.zigi_quiet_s / 2 if last_any else _BACKUP_POLL_S, deadline - time.monotonic()))
             try:
-                event = await asyncio.wait_for(anext(sub), wait)
+                # Wait on the queue, never on the subscription itself: a timeout cancels what it waits on, and
+                # cancelling the subscription's generator closed it (09 Nov: deaf after the first quiet 0.6 s).
+                event = await asyncio.wait_for(inbox.get(), wait)
+                if isinstance(event, Exception):
+                    raise event
                 if event.get("kind") == "bot_message":
                     candidates = [Message.from_dict(event["message"])]
-            except (TimeoutError, StopAsyncIteration):
-                if not last_any and time.monotonic() - start >= 8.0:
-                    use_bus = False  # nothing published: the gateway may not be watching; poll instead
+            except TimeoutError:
+                pass
+            except Exception as exc:  # noqa: BLE001 - a broken subscription: poll from here on
+                logfire.warn("Zigi reply channel failed ({error}); polling instead", error=type(exc).__name__)
+                use_bus = False
+            # A message can miss the channel (seen 09 Nov: Zigi's answer after its greeting never arrived, so the
+            # agent waited out the timeout). Poll SunCo as a backup every few seconds while listening.
+            if time.monotonic() - last_poll >= _BACKUP_POLL_S:
+                last_poll = time.monotonic()
+                try:
+                    candidates = [*candidates, *await deps.provider.list_messages(deps.conversation_id)]
+                except SunCoError:
+                    pass
         else:
             await asyncio.sleep(cfg.zigi_poll_interval_s)
             try:

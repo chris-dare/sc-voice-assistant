@@ -37,7 +37,18 @@ from app.sunco import ConversationProvider, Message, SunCoError
 from .cache import SemanticCache, not_cacheable_reason, question_cacheable
 from .config import AgentSettings
 from .persona import PERSONA
-from .rules import ZigiState, is_affirmative, links_in, mask_digits, shape_input, state_prompt, tool_result
+from .rules import (
+    _STOP,
+    ZigiState,
+    _plain,
+    is_affirmative,
+    links_in,
+    mask_digits,
+    pick_option,
+    shape_input,
+    state_prompt,
+    tool_result,
+)
 
 
 @dataclass
@@ -322,18 +333,21 @@ async def choose_option(ctx: RunContext[CallDeps], option: str, lead_in: str = "
     """
     pick = _find_option(ctx.deps.zigi, option)
     assert pick is not None  # ZigiGuardrails checked it
-    content: dict[str, Any] = {"type": "text", "text": str(pick["text"])}
+    # A numbered list in Zigi's text is answered with the number; a button with its own text (as a tap would).
+    content: dict[str, Any] = {"type": "text", "text": str(pick.get("number") or pick["text"])}
     if pick.get("payload"):
         content["payload"] = pick["payload"]
     return await _send_to_zigi(ctx, content)
 
 
 def _find_option(zigi: ZigiState, option: str) -> dict[str, Any] | None:
-    want = option.strip().lower()
-    options = zigi.options
-    return next((a for a in options if str(a["text"]).strip().lower() == want), None) or next(
-        (a for a in options if want and want in str(a["text"]).lower()), None
-    )
+    return pick_option(zigi.options, option)
+
+
+def _caller_chose(deps: CallDeps, pick: dict[str, Any]) -> bool:
+    """The caller's own words this turn name this option (the agent never chooses for them)."""
+    said = pick_option(deps.zigi.options, deps.user_said)
+    return said is not None and str(said.get("number") or said["text"]) == str(pick.get("number") or pick["text"])
 
 
 # ------------------------------------------------------------------ guardrails (5.8.4)
@@ -346,6 +360,28 @@ class ZigiGuardrails(AbstractCapability[CallDeps]):
     ) -> ValidatedToolArgs:
         deps = ctx.deps
         waiting = deps.zigi.waiting_for
+        if call.tool_name == "ask_zigi" and waiting == "menu_choice" and deps.zigi.options:
+            # Seen 09 Nov: sentences sent to Zigi's numbered bundle menu were read as "no choice", six times over.
+            said = str(args.get("text") or "")
+            pick = pick_option(deps.zigi.options, said) or pick_option(deps.zigi.options, deps.user_said)
+            menu_text = deps.zigi.text().lower()
+            if pick is not None and not _caller_chose(deps, pick):
+                self._refuse_unchosen(deps, call.tool_name)
+            if pick is not None:
+                value = str(pick.get("number") or pick["text"])
+                await self._lead(deps, args)
+                return {**args, "text": value}
+            if _plain(said) in {"exit", "cancel", "stop"} and "exit" in menu_text and _STOP.search(deps.user_said):
+                await self._lead(deps, args)
+                return {**args, "text": "exit"}
+            names = " | ".join(f"{o['number']}. {o['text']}" if o.get("number") else str(o["text"]) for o in deps.zigi.options)
+            self._refuse(
+                deps,
+                call.tool_name,
+                f"ZIGI is waiting for the caller to pick one option and won't understand anything else: {names}. "
+                "If the caller has chosen, use choose_option with that option. If not, read them two or three of the "
+                "options in plain words and ask which one they'd like.",
+            )
         if call.tool_name == "ask_zigi":
             text, refusal = shape_input(str(args.get("text") or ""), waiting, deps.user_said)
             if refusal or text is None:
@@ -367,6 +403,8 @@ class ZigiGuardrails(AbstractCapability[CallDeps]):
             if pick is None:
                 names = ", ".join(str(a["text"]) for a in deps.zigi.options) or "none"
                 self._refuse(deps, call.tool_name, f"That is not one of ZIGI's options. The options are: {names}.")
+            elif waiting == "menu_choice" and not _caller_chose(deps, pick):
+                self._refuse_unchosen(deps, call.tool_name)
             elif waiting == "confirmation" and is_affirmative(str(pick["text"])) and not is_affirmative(deps.user_said):
                 self._refuse(deps, call.tool_name, "The caller has not said yes in this turn. Ask them and wait for their answer.")
             await self._lead(deps, args)
@@ -386,6 +424,15 @@ class ZigiGuardrails(AbstractCapability[CallDeps]):
         if call.tool_name == "web_fetch":
             ctx.deps.grounding.append(str(getattr(result, "content", result))[:8000])
         return result
+
+    def _refuse_unchosen(self, deps: CallDeps, tool: str) -> None:
+        # Seen 09 Nov in a test: the agent answered "Who is this purchase for?" with "Myself" on its own.
+        names = " | ".join(str(o["text"]) for o in deps.zigi.options)
+        self._refuse(
+            deps,
+            tool,
+            f"The caller hasn't chosen that. Never pick for them. Ask them, briefly and naturally, which they want: {names}.",
+        )
 
     @staticmethod
     async def _lead(deps: CallDeps, args: ValidatedToolArgs) -> None:

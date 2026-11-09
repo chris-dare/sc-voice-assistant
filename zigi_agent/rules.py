@@ -27,6 +27,8 @@ _CONFIRM = re.compile(
     r"\b(confirm|yes or no|reply yes|reply with yes|do you want to proceed|would you like to proceed|shall i proceed|are you sure)\b", re.I
 )
 _NUMBERED = re.compile(r"(?m)^\s*\d+[.)]\s+\S")
+_SELECT = re.compile(r"\b(select|choose|pick|reply with|enter)\b.{0,80}\b(number|option)", re.I)
+_ITEM = re.compile(r"(?m)^\s*(\d{1,2})[.)]\s+(.+?)\s*$")
 _EXAMPLE = re.compile(r"^(for example|e\.g\.|eg|example|format)\b|X{3,}", re.I)
 
 
@@ -39,10 +41,17 @@ class ZigiState:
 
     @property
     def options(self) -> list[dict[str, Any]]:
+        """Zigi's choices: its buttons, or else a numbered list in its text ("4. 837.55MB @ GHS 10"), where the
+        choice is made by sending the number (seen 09 Nov: the bundle menu has no buttons)."""
         for m in reversed(self.messages):
             acts = [a for a in (m.content.get("actions") or []) if a.get("type") in {"reply", "postback"} and a.get("text")]
             if acts:
                 return acts
+        if self.waiting_for == "menu_choice":
+            for m in reversed(self.messages):
+                items = numbered_options(m.text)
+                if len(items) >= 2:
+                    return [{"text": label, "number": num} for num, label in items]
         return []
 
     def update(self, burst: list[Message]) -> None:
@@ -88,6 +97,8 @@ def classify_waiting(messages: list[Message]) -> str:
         return "otp"
     if _PHONE.search(ask) and ("?" in ask or re.search(r"\b(enter|provide|type|send|share|give)\b", ask, re.I)):
         return "phone_number"
+    if _SELECT.search(ask) and any(len(numbered_options(m.text)) >= 2 for m in messages[-3:]):
+        return "menu_choice"  # "Please select ... by providing the corresponding number"; the list was a message before
     if _AMOUNT.search(ask):
         return "amount"
     if _CONFIRM.search(ask) or {"yes", "no"} <= act_texts:
@@ -334,9 +345,9 @@ def state_prompt(zigi: ZigiState) -> str:
     if zigi.messages:
         lines.append("ZIGI's last reply:")
         lines.extend(f"- {m.text}" for m in zigi.messages if m.text)
-    opts = [o["text"] for o in zigi.options]
+    opts = [f"{o['number']}. {o['text']}" if o.get("number") else str(o["text"]) for o in zigi.options]
     if opts:
-        lines.append("Options: " + " | ".join(opts))
+        lines.append("Options (pick one with choose_option): " + " | ".join(opts))
     if not zigi.messages:
         lines.append("ZIGI has not said anything yet in this call.")
     return "\n".join(lines)
@@ -385,3 +396,63 @@ _REPEAT = re.compile(r"\b(again|repeat|say that|come again|didn'?t (catch|hear)|
 def asks_about_mtn(text: str) -> bool:
     """A question about an MTN product or service: the answer must come from ZIGI (or its cached answer)."""
     return bool(_MTN_TOPIC.search(text) and _QUESTION.search(text) and not _REPEAT.search(text))
+
+
+_ALIASES = {
+    "someone else": re.compile(
+        r"\b(someone else|somebody else|another (person|number)|other number|(for|to) (my|a) \w+|for (him|her|them)|gift)\b", re.I
+    ),
+    "myself": re.compile(r"\b(for me|it'?s me|myself|my (own )?number|mine|me)\b", re.I),
+    "yes": re.compile(r"^\s*(yes|yeah|yep|sure|ok(ay)?|go ahead|please do)\b", re.I),
+    "no": re.compile(r"^\s*(no|nope|nah|don'?t)\b", re.I),
+}
+
+
+def numbered_options(text: str) -> list[tuple[str, str]]:
+    """("4", "837.55MB @ GHS 10") pairs from a numbered list in Zigi's text."""
+    return [(m.group(1), m.group(2).strip()) for m in _ITEM.finditer(text or "")]
+
+
+def _norm_choice(text: str) -> str:
+    text = text.lower().replace("ghs", " ").replace("gh₵", " ").replace("cedis", " ").replace("cedi", " ")
+    text = re.sub(r"\b(the|one|bundle|for|myself|option|number|please|i want|i'?d like|to buy|buy)\b", " ", text)
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9. ]", " ", text)).strip()
+
+
+def pick_option(options: list[dict[str, Any]], said: str) -> dict[str, Any] | None:
+    """Which of Zigi's options the caller (or agent) means: by its number, its label, or a price or size in it."""
+    said = said.strip()
+    if not options or not said:
+        return None
+    if "?" in said:
+        return None  # a question about the options is not a choice
+    words = [w for w in re.findall(r"[a-z0-9]+", said.lower()) if w not in {"option", "number", "the", "please", "go", "with"}]
+    if words and all(w.isdigit() or w in _STRICT_DIGIT_WORDS for w in words) and len(words) <= 2:
+        num = "".join(w if w.isdigit() else _STRICT_DIGIT_WORDS[w] for w in words)
+        hit = next((o for o in options if str(o.get("number", "")) == num), None)
+        if hit:
+            return hit
+    want = _norm_choice(said)
+    for o in options:
+        if _norm_choice(str(o["text"])) == want:
+            return o
+    # How people say Zigi's common choices
+    for label, pattern in _ALIASES.items():
+        if pattern.search(said):
+            hit = [o for o in options if label in str(o["text"]).lower()]
+            if len(hit) == 1:
+                return hit[0]
+    # a size or price that appears in exactly one option ("837.55MB", "10 cedis", "the GHS 3 one")
+    tokens = [t for t in re.findall(r"\d+(?:\.\d+)?\s*(?:mb|gb)?", said.lower()) if t.strip()]
+    for tok in tokens:
+        tok = tok.replace(" ", "")
+        matches = [o for o in options if re.search(rf"(?<![\d.]){re.escape(tok)}(?![\d.])", str(o["text"]).lower().replace(" ", ""))]
+        if len(matches) == 1:
+            return matches[0]
+    if len(said.split()) <= 4:  # a short naming of one option ("Flexi", "someone else")
+        want_words = set(want.split()) - {"data", "bundles", "bundle", "mb", "gb"}
+        scored = [(len(want_words & set(_norm_choice(str(o["text"])).split())), o) for o in options]
+        best = max(scored, key=lambda x: x[0], default=(0, None))
+        if best[0] >= 1 and sum(1 for sc, _ in scored if sc == best[0]) == 1:
+            return best[1]
+    return None

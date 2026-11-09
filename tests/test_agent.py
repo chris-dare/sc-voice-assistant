@@ -266,3 +266,31 @@ def test_mtn_questions_are_recognised():
     assert not asks_about_mtn("What can you do?")
     assert not asks_about_mtn("Sorry, can you say the MoMo part again?")
     assert not asks_about_mtn("Thanks, that's all")
+
+
+def test_zigis_numbered_bundle_menu_is_answered_with_a_number():
+    """Seen 09 Nov: the menu and "Please select ... corresponding number" came as two messages, so the menu was missed
+    and sentences were sent instead of "4", six times over."""
+    from zigi_agent.rules import ZigiState, pick_option
+
+    menu = msg(
+        "Available bundles are:\n\n1. 20.73MB @ GHS 0.5\n2. 41.46MB @ GHS 1\n3. 406.89MB @ GHS 3\n4. 837.55MB @ GHS 10\n7. Flexi Data"
+    )
+    ask = msg(
+        "Please select the price of bundles you'd like to buy by providing the corresponding number "  # noqa: ISC003
+        + '(e.g., "1" or "2") or type exit to stop the process.'
+    )
+    z = ZigiState()
+    z.update([menu, ask])
+    assert z.waiting_for == "menu_choice"
+    assert [o["number"] for o in z.options] == ["1", "2", "3", "4", "7"]
+    for said, number in [
+        ("4", "4"),
+        ("four", "4"),
+        ("The 10 cedis is fine", "4"),
+        ("I want the 837.55MB bundle for GHS 10", "4"),
+        ("Flexi", "7"),
+    ]:
+        assert pick_option(z.options, said)["number"] == number, said
+    for said in ["Yes", "What are all the available data bundles?"]:
+        assert pick_option(z.options, said) is None, said

@@ -23,6 +23,13 @@ _FAQ = {
 }
 
 
+_BUNDLES = {"1": "20.73MB @ GHS 0.5", "2": "41.46MB @ GHS 1", "3": "406.89MB @ GHS 3", "4": "837.55MB @ GHS 10", "5": "Flexi Data"}
+_SELECT_LINE = (
+    "Please select the price of bundles you'd like to buy by providing the corresponding number "
+    '(e.g., "1" or "2") or type exit to stop the process.'
+)
+
+
 class MockSunCo:
     """In-memory conversations with a scripted telco FAQ bot."""
 
@@ -79,6 +86,27 @@ class MockSunCo:
                 self._flow[conv] = "otp"
                 self._msg(conv, "business", {"type": "text", "text": "Invalid OTP. Please enter only the digits of the OTP."})
             return
+        if flow == "menu":
+            # Like Zigi's real bundle menu (09 Nov): anything but a listed number counts as no choice.
+            if lowered in _BUNDLES:
+                self._flow[conv] = f"for:{lowered}"
+                self._msg(
+                    conv,
+                    "business",
+                    {
+                        "type": "text",
+                        "text": "Who is this purchase for?",
+                        "actions": [{"type": "reply", "text": "Myself"}, {"type": "reply", "text": "Someone else"}],
+                    },
+                )
+            else:
+                self._flow[conv] = "menu"
+                self._msg(conv, "business", {"type": "text", "text": "Sorry, I didn't get a bundle choice. " + _SELECT_LINE})
+            return
+        if flow and flow.startswith("for:"):
+            bundle = _BUNDLES[flow[4:]]
+            self._msg(conv, "business", {"type": "text", "text": f"Done! {bundle} has been added for you."})
+            return
         if flow == "fibre":
             self._msg(
                 conv,
@@ -93,6 +121,13 @@ class MockSunCo:
         if re.search(r"\bfib(re|er)\b", lowered):
             self._flow[conv] = "fibre"
             self._msg(conv, "business", {"type": "text", "text": "Sure! Which area or town should I check fibre availability for?"})
+            return
+        if re.search(r"\b(show|list|what)\b.*\bbundles\b", lowered):
+            self._flow[conv] = "menu"
+            menu = "\n".join(f"{k}. {v}" for k, v in _BUNDLES.items())
+            self._msg(conv, "business", {"type": "text", "text": f"Available bundles are:\n\n{menu}"})
+            await asyncio.sleep(self._delay / 3)
+            self._msg(conv, "business", {"type": "text", "text": _SELECT_LINE})
             return
         if re.search(r"\b(i want to|i'd like to|please) buy\b|\bpurchase\b", lowered):
             self._flow[conv] = "otp"

@@ -176,6 +176,12 @@ dataset = Dataset[Call, Heard, Expect](
         ),
         Case(name="purchase_asks_otp", inputs=Call([BUY]), metadata=Expect(route="zigi", mentions=["otp", "code"])),
         Case(
+            # 09 Nov: sentences sent to Zigi's numbered bundle menu were read as "no choice", six times over.
+            name="bundle_menu_gets_a_number",
+            inputs=Call(["Show me the data bundles", "The 10 cedis one is fine", "It's for me"]),
+            metadata=Expect(sent=["Myself"], mentions=["added", "done"]),
+        ),
+        Case(
             name="otp_in_a_sentence",
             inputs=Call([BUY, "my OTP is four five one two nine"]),
             metadata=Expect(route="zigi", sent=["45129"], mentions=["confirm", "1gb", "5"]),

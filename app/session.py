@@ -407,6 +407,7 @@ class VoiceSession:
     async def _load_call_state(self) -> None:
         """Pick up the agent's memory of this conversation (survives reconnects, e.g. Vercel's 300 s limit)."""
         if self.svc.store is None:
+            await self._zigi_state_from_sunco()
             return
         with contextlib.suppress(Exception):
             data = await self.svc.store.get_json(self._state_key())
@@ -417,6 +418,31 @@ class VoiceSession:
                 self.memory = dict(data.get("memory") or {})
                 self.sends = list(data.get("sends") or [])
                 self.zigi_seen = set(data.get("zigi_seen") or [])
+                return
+        await self._zigi_state_from_sunco()
+
+    async def _zigi_state_from_sunco(self) -> None:
+        """No saved state: read where Zigi left off from the conversation itself.
+
+        Seen 09 Nov: a call started while Zigi was still waiting for a phone number from an earlier session (the
+        saved state had expired), so the agent sent "I want to purchase" into Zigi's phone-number prompt.
+        """
+        try:
+            messages = await self.svc.provider.list_messages(self.ctx.conversation_id)
+        except Exception:  # noqa: BLE001
+            return
+        tail: list[Any] = []
+        for m in reversed(messages):
+            if m.author_type != "business":
+                break
+            if m.content.get("type") == "text" and not self.svc.speakable(m.text):
+                continue
+            tail.append(m)
+        tail.reverse()
+        if tail:
+            self.zigi.update(tail)
+            self.zigi_seen.update(m.id for m in messages)
+            self.grounding.extend(m.text for m in tail if m.text)
 
     async def _save_call_state(self) -> None:
         if self.svc.store is None:

@@ -13,4 +13,4 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 version=$(curl -fsS https://eu-assets.i.posthog.com/static/array.js | grep -oE '"1\.[0-9]+\.[0-9]+"' | head -1 | tr -d '"')
 echo "posthog-js served: ${version}"
 printf '{"name":"web-audit","private":true,"dependencies":{"posthog-js":"%s"}}' "$version" > "$tmp/package.json"
-(cd "$tmp" && npm install --package-lock-only --ignore-scripts --silent && npm audit --audit-level=low)
+(cd "$tmp" && npm install --package-lock-only --ignore-scripts --silent --prefer-online && npm audit --audit-level=low)

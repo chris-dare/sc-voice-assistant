@@ -294,3 +294,27 @@ def test_zigis_numbered_bundle_menu_is_answered_with_a_number():
         assert pick_option(z.options, said)["number"] == number, said
     for said in ["Yes", "What are all the available data bundles?"]:
         assert pick_option(z.options, said) is None, said
+
+
+def test_how_to_steps_are_not_a_menu_and_offers_are_yes_no():
+    """Seen 09 Nov: Zigi's numbered Just4U how-to was taken for a menu, and every question was refused after it."""
+    from zigi_agent.rules import ZigiState
+
+    how_to = msg(
+        "You can buy a Just4U offer using the following methods:\n\nOption 1: MyMTN App\n1. Launch the MyMTN App.\n"
+        '2. Select "Just4U" on the homepage.\n3. Choose your preferred option.\n\nOption 2: USSD\n1. Dial *141#.\n'
+        "2. Select your preferred option.\n\nWould you like me to help you purchase a Just4U bundle?"
+    )
+    z = ZigiState()
+    z.update([how_to])
+    assert z.waiting_for == "confirmation" and z.options == []
+
+
+def test_echo_of_the_assistant_is_dropped():
+    from app.session import VoiceSession
+
+    s = VoiceSession.__new__(VoiceSession)
+    s.recent_spoken = [(time.monotonic(), "Got it. What else can I help with?")]
+    assert s._is_echo("What else can I help with?")
+    assert not s._is_echo("How do I buy airtime?")
+    assert not s._is_echo("yes")

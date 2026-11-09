@@ -722,8 +722,9 @@ class VoiceClient {
         if (ev.speech) setCaption("bot", (ev.message.content && ev.message.content.text) || ev.speech, null, { append: true });
         break;
       case "turn_ignored":
-        // The agent judged that wasn't said to it (someone else in the room).
-        setCaption("user", "");
+        // The agent judged that wasn't said to it (someone else in the room). Say so quietly, so the caller
+        // knows to repeat it if it was meant for the assistant.
+        setCaption("user", "Sounded like that wasn't for me. Say it again if it was.");
         track("voice_turn_ignored", { mode: this.mode });
         this.awaitingReply = false;
         break;

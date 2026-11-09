@@ -24,7 +24,9 @@ _OTP = re.compile(
 _PHONE = re.compile(r"\b(phone|mobile|momo|msisdn|recipient'?s?) number\b", re.I)
 _AMOUNT = re.compile(r"\b(enter|what|which|how much|specify)\b.{0,30}\bamount\b|\bhow much\b", re.I)
 _CONFIRM = re.compile(
-    r"\b(confirm|yes or no|reply yes|reply with yes|do you want to proceed|would you like to proceed|shall i proceed|are you sure)\b", re.I
+    r"\b(confirm|yes or no|reply yes|reply with yes|do you want to proceed|would you like to proceed|shall i proceed|are you sure|"
+    r"would you like me to|do you want me to|shall i|should i)\b",
+    re.I,
 )
 _NUMBERED = re.compile(r"(?m)^\s*\d+[.)]\s+\S")
 _SELECT = re.compile(r"\b(select|choose|pick|reply with|enter)\b.{0,80}\b(number|option)", re.I)
@@ -103,8 +105,9 @@ def classify_waiting(messages: list[Message]) -> str:
         return "amount"
     if _CONFIRM.search(ask) or {"yes", "no"} <= act_texts:
         return "confirmation"
-    if len(acts) >= 2 or (len(_NUMBERED.findall(last)) >= 2 and "?" in ask):
+    if len(acts) >= 2:
         return "menu_choice"
+    # A numbered how-to ("1. Launch the MyMTN App") is not a menu; only an explicit "select ... number" is (above).
     return "none"
 
 
@@ -408,9 +411,26 @@ _ALIASES = {
 }
 
 
+_STEP = re.compile(
+    r"^(launch|open|dial|select|choose|go|tap|click|enter|proceed|visit|provide|navigate|log|sign|download|wait|"
+    r"confirm|follow|use|check|send|reply|type|press|input|make|complete|scroll)\b",
+    re.I,
+)
+
+
 def numbered_options(text: str) -> list[tuple[str, str]]:
-    """("4", "837.55MB @ GHS 10") pairs from a numbered list in Zigi's text."""
-    return [(m.group(1), m.group(2).strip()) for m in _ITEM.finditer(text or "")]
+    """("4", "837.55MB @ GHS 10") pairs from ONE numbered list of choices in Zigi's text.
+
+    Instructions are not choices: a list of steps ("1. Launch the MyMTN App", seen 09 Nov) or several lists in one
+    message (numbers restart) give nothing.
+    """
+    items = [(m.group(1), m.group(2).strip()) for m in _ITEM.finditer(text or "")]
+    numbers = [n for n, _ in items]
+    if len(set(numbers)) != len(numbers):
+        return []
+    if items and sum(1 for _, label in items if _STEP.match(label)) * 2 >= len(items):
+        return []
+    return items
 
 
 def _norm_choice(text: str) -> str:

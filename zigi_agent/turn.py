@@ -174,7 +174,7 @@ async def _stream(agent, deps, prompt, messages, extra, emit, state, t0):  # noq
     deps.lead = lead
     # Mid-step (Zigi waiting for a number, code or confirmation) is where the model drafted, called a tool, got
     # refused and drafted again. There, hold the whole reply. Otherwise stream sentences as they complete.
-    stream_now = deps.zigi.waiting_for == "none"
+    stream_now = deps.zigi.waiting_for in {"none", "confirmation"}
 
     async def release() -> None:
         nonlocal held

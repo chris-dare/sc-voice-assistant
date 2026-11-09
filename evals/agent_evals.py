@@ -196,6 +196,12 @@ dataset = Dataset[Call, Heard, Expect](
             inputs=Call(["How does roaming work?", "sorry, my friend was talking. Can you say that again?"]),
             metadata=Expect(route="direct", sent=[], mentions=["abroad", "135", "roam"]),
         ),
+        Case(
+            # 09 Nov: a numbered how-to was taken for a menu, and every later question was refused.
+            name="how_to_steps_are_not_a_menu",
+            inputs=Call(["How do I buy a Just4U offer?", "Okay. And how does roaming work?"]),
+            metadata=Expect(route="zigi", mentions=["abroad", "135", "roam"]),
+        ),
         Case(name="purchase_asks_otp", inputs=Call([BUY]), metadata=Expect(route="zigi", mentions=["otp", "code"])),
         Case(
             # 09 Nov: sentences sent to Zigi's numbered bundle menu were read as "no choice", six times over.

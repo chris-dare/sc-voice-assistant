@@ -17,6 +17,13 @@ from .stt import TranscriptEvent
 from .sunco import Message
 
 _FAQ = {
+    # Like Zigi's real answer (09 Nov): numbered steps in several lists, then a yes/no offer.
+    "just4u": (
+        "You can buy a Just4U offer using the following methods:\n\nOption 1: MyMTN App\n1. Launch the MyMTN App.\n"
+        '2. Select "Just4U" on the homepage.\n3. Choose your preferred option.\n\nOption 2: USSD\n1. Dial *141#.\n'
+        "2. Select your preferred option.\n3. Enter 1 to confirm the purchase.\n\n"
+        "Would you like me to help you purchase a Just4U bundle?"
+    ),
     "roaming": "Roaming lets you use your MTN number abroad. Prepaid roaming is on by default. Dial *135# to check rates.",
     "bundle": "You can buy a data bundle by dialling *138#. For example, 5GB costs GH₵25.",
     "momo": "MoMo is MTN Mobile Money. Dial *170# to send money, pay bills or buy airtime.",

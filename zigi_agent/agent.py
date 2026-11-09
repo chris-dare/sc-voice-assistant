@@ -38,6 +38,7 @@ from .cache import SemanticCache, not_cacheable_reason, question_cacheable
 from .config import AgentSettings
 from .persona import PERSONA
 from .rules import (
+    _QUESTION,
     _STOP,
     ZigiState,
     _plain,
@@ -344,6 +345,13 @@ def _find_option(zigi: ZigiState, option: str) -> dict[str, Any] | None:
     return pick_option(zigi.options, option)
 
 
+def _is_question(deps: CallDeps) -> bool:
+    """The caller asked something rather than picking: let it through to Zigi (seen 09 Nov: every question was
+    refused while a menu was thought to be open)."""
+    said = deps.user_said.strip()
+    return pick_option(deps.zigi.options, said) is None and len(said.split()) >= 4 and bool(_QUESTION.search(said))
+
+
 def _caller_chose(deps: CallDeps, pick: dict[str, Any]) -> bool:
     """The caller's own words this turn name this option (the agent never chooses for them)."""
     said = pick_option(deps.zigi.options, deps.user_said)
@@ -360,7 +368,7 @@ class ZigiGuardrails(AbstractCapability[CallDeps]):
     ) -> ValidatedToolArgs:
         deps = ctx.deps
         waiting = deps.zigi.waiting_for
-        if call.tool_name == "ask_zigi" and waiting == "menu_choice" and deps.zigi.options:
+        if call.tool_name == "ask_zigi" and waiting == "menu_choice" and deps.zigi.options and not _is_question(deps):
             # Seen 09 Nov: sentences sent to Zigi's numbered bundle menu were read as "no choice", six times over.
             said = str(args.get("text") or "")
             pick = pick_option(deps.zigi.options, said) or pick_option(deps.zigi.options, deps.user_said)

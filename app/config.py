@@ -101,6 +101,8 @@ class Settings(BaseSettings):
     noise_gate: bool = True
     # Client learns the caller's speaking level and ignores voices well below it (others in the room)
     voice_focus: bool = True
+    # Testing only: log what the caller and the agent said (off in normal use; design 6.2 keeps text out of logs)
+    log_conversation_text: bool = False
     # Commit the transcript this long after the client's end of speech if STT has not (noise can hold STT's VAD open).
     stt_force_commit_s: float = 1.0
 

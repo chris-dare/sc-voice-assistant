@@ -34,6 +34,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+import logfire
 from fastapi import WebSocket, WebSocketDisconnect
 
 from zigi_agent.rules import ZigiState, spoken_digits, state_from_dict, state_to_dict
@@ -52,6 +53,7 @@ from .tts import TTSError
 log = logging.getLogger(__name__)
 
 _HAS_WORD = re.compile(r"[A-Za-z0-9]")
+_WORDS = re.compile(r"[a-z0-9']+")
 # Transcripts made only of fillers or noise words are not a turn ("Uh, uh, uh").
 _FILLER = re.compile(r"^(?:\s|[.,!?…-])*(?:(?:uh|um+|uhm|hmm+|mm+|ah+|er+|eh|oh|huh|hm)(?:\s|[.,!?…-])*)+$", re.I)
 _PREROLL_BYTES = 16000  # 0.5 s of 16 kHz PCM16 kept before speech_start (batch mode)
@@ -135,6 +137,8 @@ class VoiceSession:
         self.agent_phase = "idle"  # idle | llm | zigi: what the running agent turn is doing
         self.agent_turn: Turn | None = None  # the turn the agent is working on
         self.followups: list[Turn] = []  # caller turns heard while Zigi was busy
+        self.recent_spoken: list[tuple[float, str]] = []  # what we said lately, to drop echoes of it
+        self.ignored_in_a_row = 0
         self.superseded = False  # the caller spoke over the agent's answer to Zigi's reply; it was not said
         self.held: tuple[Turn, asyncio.Task[None]] | None = None  # a number the caller is still dictating
         self.grounding: list[str] = []  # Zigi's and the caller's words this call: what numbers may come from
@@ -279,7 +283,7 @@ class VoiceSession:
         except STTError as exc:
             await self.send({"type": "error", "code": "stt_failed", "text": str(exc)})
             return
-        if _HAS_WORD.search(text) and not _FILLER.match(text):
+        if _HAS_WORD.search(text) and not _FILLER.match(text) and not self._is_echo(text):
             await self._user_text(text, source="voice")
 
     async def _force_commit(self, ended_at: float) -> None:
@@ -305,6 +309,9 @@ class VoiceSession:
                     self.last_final_at = time.monotonic()
                     if _FILLER.match(ev.text):
                         log.info("ignored a filler-only transcript")
+                        await self.send({"type": "transcript_partial", "text": ""})
+                    elif self._is_echo(ev.text):
+                        log.info("ignored a transcript of the assistant's own voice (echo)")
                         await self.send({"type": "transcript_partial", "text": ""})
                     elif _HAS_WORD.search(ev.text):
                         await self._user_text(ev.text.strip(), source="voice")
@@ -582,6 +589,13 @@ class VoiceSession:
 
     async def _agent_turn(self, turn: Turn, kind: str) -> None:
         self.agent_turn, self.agent_phase = turn, "llm"
+        if kind == "user" and self.ignored_in_a_row >= 2 and not turn.note:
+            turn.note = (
+                "You stayed silent for the last two things you heard. If this could be meant for you at all, "
+                "answer it; the caller may be repeating themselves."
+            )
+        if self.cfg.log_conversation_text and kind == "user":
+            logfire.info("caller said {text}", text=turn.text, turn_id=turn.id)
         request = {
             "conversation_id": self.ctx.conversation_id,
             "sunco_user_id": self.ctx.sunco_user_id,
@@ -632,6 +646,8 @@ class VoiceSession:
                 self.superseded = True
                 return
             turn.spoken.append(text)
+            if self.cfg.log_conversation_text:
+                logfire.info("agent said {text}", text=text, turn_id=turn.id, filler=filler)
             turn.filler_spoken |= filler
             await self.send({"type": "agent_text", "turn_id": turn.id, "text": text, "filler": filler})
             item_id = f"{'hold' if filler else 'agent'}-{turn.id}-{len(turn.spoken)}"
@@ -664,8 +680,10 @@ class VoiceSession:
             turn.done = True
             if turn.route == "ignored":
                 # The agent judged this wasn't said to it (someone else in the room): say nothing, keep listening.
+                self.ignored_in_a_row += 1
                 await self.send({"type": "turn_ignored", "turn_id": turn.id})
                 return
+            self.ignored_in_a_row = 0
             await self._report(turn)
 
     # ------------------------------------------------------------------ speaking
@@ -690,7 +708,23 @@ class VoiceSession:
         t = self.turn
         return t is not None and t.relay and t.t_bot_first is None and t.t_bot_any is None
 
+    def _is_echo(self, text: str) -> bool:
+        """The transcript is the assistant's own recent words picked up by the mic (seen 09 Nov on an iPhone
+        speaker: "What else can I help with?" was sent to Zigi as if the caller said it)."""
+        words = _WORDS.findall(text.lower())
+        if len(words) < 3:
+            return False
+        now = time.monotonic()
+        for at, said in self.recent_spoken:
+            if now - at > 30:
+                continue
+            spoken = set(_WORDS.findall(said.lower()))
+            if sum(w in spoken for w in words) / len(words) >= 0.8:
+                return True
+        return False
+
     async def _speak(self, item: SpeakItem) -> None:
+        self.recent_spoken = [*self.recent_spoken[-7:], (time.monotonic(), item.text)]
         rate = self.cfg.tts_sample_rate
         fmt = f"pcm_{rate}"
         sentences = split_sentences(item.text)[:40]

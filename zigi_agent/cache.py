@@ -75,22 +75,48 @@ def question_cacheable(text: str, waiting_for: str) -> bool:
     return waiting_for == "none" and 3 <= len(words) <= 30 and not _PERSONAL.search(text) and not re.search(r"\d{4,}", text)
 
 
-def answer_cacheable(result: dict[str, Any]) -> bool:
+_CLOSING = re.compile(
+    r"(is there anything else[^.?!]*|anything else (i|we) can[^.?!]*|how (else )?can i (help|assist)[^.?!]*|"
+    r"let me know if[^.?!]*|feel free to[^.?!]*|i'?m here to help[^.?!]*)[.?!]*\s*$",
+    re.I,
+)
+
+
+def _without_closing(text: str) -> str:
+    """Zigi ends most answers with "Is there anything else I can assist you with?": that is not a request."""
+    text = text.strip()
+    while True:
+        trimmed = _CLOSING.sub("", text).strip()
+        if trimmed == text:
+            return text
+        text = trimmed
+
+
+def not_cacheable_reason(result: dict[str, Any]) -> str | None:
+    """None when the answer can be reused for other callers; otherwise why not (logged)."""
     msgs = result.get("zigi_messages") or []
-    text = " ".join(m.get("text", "") for m in msgs)
-    last = (msgs[-1].get("text", "") if msgs else "").strip()
-    return (
-        bool(msgs)
-        and not result.get("timed_out")
-        and result.get("waiting_for") == "none"
-        and len(text) >= 40
-        and not _ANSWER_UNSAFE.search(text)
-        # An answer that asks the caller something is the start of a flow, not an answer (seen 09 Nov in the evals:
-        # "Which area or town should I check?" was served from cache to the next caller).
-        and not last.rstrip().endswith("?")
-        and not _ASKS.search(text)
-        and not result.get("options")
-    )
+    if not msgs:
+        return "no answer"
+    if result.get("timed_out"):
+        return "timed out"
+    if result.get("waiting_for") != "none":
+        return f"waiting for {result.get('waiting_for')}"
+    if result.get("options"):
+        return "offers options"
+    text = _without_closing(" ".join(str(m.get("text", "")) for m in msgs))
+    if len(text) < 40:
+        return "too short"
+    if _ANSWER_UNSAFE.search(text):
+        return "personal or error wording"
+    # An answer that asks the caller something is the start of a flow, not an answer (seen 09 Nov in the evals:
+    # "Which area or town should I check?" was served from cache to the next caller).
+    if text.endswith("?") or _ASKS.search(text):
+        return "asks the caller something"
+    return None
+
+
+def answer_cacheable(result: dict[str, Any]) -> bool:
+    return not_cacheable_reason(result) is None
 
 
 def _cosine(a: list[float], b: list[float]) -> float:

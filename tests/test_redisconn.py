@@ -34,3 +34,30 @@ def test_unreachable_redis_falls_back_to_memory():
     got, first = asyncio.run(go())
     assert got == {"a": 1} and first == {"x": 1}
     redisconn.reset()
+
+
+def test_a_failure_is_retried_after_a_while(monkeypatch):
+    redisconn.reset()
+
+    class Flaky:
+        def __init__(self):
+            self.ok = False
+
+        async def ping(self):
+            if not self.ok:
+                raise ConnectionError("down")
+            return True
+
+    conn = Flaky()
+    clock = [1000.0]
+    monkeypatch.setattr(redisconn.time, "monotonic", lambda: clock[0])
+
+    async def go():
+        assert not await redisconn.available("redis://x", conn)
+        conn.ok = True
+        assert not await redisconn.available("redis://x", conn)  # still inside the back-off
+        clock[0] += 31
+        return await redisconn.available("redis://x", conn)
+
+    assert asyncio.run(go())
+    redisconn.reset()

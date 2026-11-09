@@ -17,6 +17,17 @@ def test_only_general_questions_are_cacheable():
 def test_only_plain_answers_are_cacheable():
     ok = {"zigi_messages": [{"text": "Roaming lets you use your MTN number abroad. Dial *135# to check rates."}], "waiting_for": "none"}
     assert answer_cacheable(ok)
+    # Zigi's usual closing question is not a request (seen 09 Nov: every real answer was skipped because of it).
+    closing = {
+        "zigi_messages": [
+            {
+                "text": "MoMo is MTN's mobile money service. You can send and receive money and pay bills. "
+                "Is there anything else I can assist you with?"
+            }
+        ],
+        "waiting_for": "none",
+    }
+    assert answer_cacheable(closing)
     assert not answer_cacheable({**ok, "waiting_for": "otp"})
     assert not answer_cacheable({**ok, "timed_out": True})
     assert not answer_cacheable(

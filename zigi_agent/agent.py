@@ -34,7 +34,7 @@ from pydantic_ai.tools import ToolDefinition
 from app.bus import Bus, channel_for
 from app.sunco import ConversationProvider, Message, SunCoError
 
-from .cache import SemanticCache, answer_cacheable, question_cacheable
+from .cache import SemanticCache, not_cacheable_reason, question_cacheable
 from .config import AgentSettings
 from .persona import PERSONA
 from .rules import ZigiState, is_affirmative, links_in, mask_digits, shape_input, state_prompt, tool_result
@@ -243,11 +243,11 @@ async def ask_zigi(ctx: RunContext[CallDeps], text: str, lead_in: str = "") -> s
             result = json.loads(out)
         except ValueError:
             result = {}
-        if answer_cacheable(result):
+        if (reason := not_cacheable_reason(result)) is None:
             await deps.cache.store_answer(text, {k: v for k, v in result.items() if k != "note"}, vec)
             logfire.info("semantic cache stored an answer")
         else:
-            logfire.info("semantic cache: answer not cacheable")
+            logfire.info("semantic cache skipped an answer: {reason}", reason=reason)
     return out
 
 

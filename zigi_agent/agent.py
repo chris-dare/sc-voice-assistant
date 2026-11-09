@@ -59,6 +59,7 @@ class CallDeps:
     bus: Bus | None = None
     cache: SemanticCache | None = None
     cache_hits: int = 0
+    answer_known: bool = False  # ZIGI's answer to this is already in the conversation (a repeat was refused)
     zigi_ms: float = 0.0
     used_zigi: bool = False
     zigi_seen: set[str] = field(default_factory=set)
@@ -350,6 +351,7 @@ class ZigiGuardrails(AbstractCapability[CallDeps]):
             if refusal or text is None:
                 self._refuse(deps, call.tool_name, refusal or "Nothing to send.")
             if _sent_recently(deps, text or ""):
+                deps.answer_known = True
                 self._refuse(
                     deps,
                     call.tool_name,

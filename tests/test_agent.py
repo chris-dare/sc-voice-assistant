@@ -255,3 +255,14 @@ def test_a_code_said_in_two_parts_reaches_zigi_once_whole():
             ws.send_text(json.dumps({"type": "text", "text": "it's four five"}))
             ev = run_turn(ws, "one two nine", has_metrics)
     assert sent_to_zigi(ev) == ["45129"]
+
+
+def test_mtn_questions_are_recognised():
+    from zigi_agent.rules import asks_about_mtn
+
+    assert asks_about_mtn("Can you tell me what MoMo is?")
+    assert asks_about_mtn("how much is the 5GB bundle")
+    assert not asks_about_mtn("Hi, good morning")
+    assert not asks_about_mtn("What can you do?")
+    assert not asks_about_mtn("Sorry, can you say the MoMo part again?")
+    assert not asks_about_mtn("Thanks, that's all")

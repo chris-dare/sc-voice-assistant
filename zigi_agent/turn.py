@@ -32,7 +32,7 @@ from pydantic_ai.run import AgentRunResultEvent
 
 from .agent import CallDeps
 from .persona import PUSH_NOTE, lead_in
-from .rules import state_to_dict, ungrounded_numbers
+from .rules import asks_about_mtn, state_to_dict, ungrounded_numbers
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 _UNGROUNDED_NOTE = (
@@ -76,7 +76,7 @@ async def _drive(
     note: str = "",
 ) -> None:
     t0 = time.monotonic()
-    state: dict[str, Any] = {"said": 0, "first": None, "last_lead": ""}
+    state: dict[str, Any] = {"said": 0, "first": None, "last_lead": "", "note": bool(note)}
     messages = ModelMessagesTypeAdapter.validate_python(history) if history else []
     prompt: str | None = text if kind == "user" else None
     extra: list[str] = [PUSH_NOTE] if kind == "push" else []
@@ -93,6 +93,7 @@ async def _drive(
                 except _Ungrounded:
                     if attempt:
                         raise
+                    state["retried"] = True
                     logfire.warn("agent draft had ungrounded numbers; asking Zigi instead")
                     extra = [*extra, _UNGROUNDED_NOTE]
             route = "push" if kind == "push" else ("zigi" if deps.used_zigi else "cache" if deps.cache_hits else "direct")
@@ -128,11 +129,24 @@ async def _stream(agent, deps, prompt, messages, extra, emit, state, t0):  # noq
     is spoken.
     """
     held = ""
+    # Enforced once per turn (a retry is allowed through), only when ZIGI is free to answer, and not when ZIGI's
+    # answer is already in the conversation (a repeat, or a reply the caller spoke over).
+    needs_zigi = (
+        not state.get("retried")
+        and prompt is not None
+        and asks_about_mtn(prompt)
+        and deps.zigi.waiting_for == "none"
+        and not state.get("note")
+    )
 
     async def say(sentence: str, *, filler: bool = False) -> None:
         sentence = sentence.strip()
         if not sentence:
             return
+        if not filler and needs_zigi and not deps.used_zigi and not deps.cache_hits and not deps.answer_known and not state["said"]:
+            # Seen 09 Nov: "Can you tell me what MoMo is?" was answered from the model's own knowledge.
+            logfire.warn("agent answered an MTN question without ZIGI; asking ZIGI instead")
+            raise _Ungrounded()
         if not filler and (missing := ungrounded_numbers(sentence, deps.grounding)):
             logfire.warn("dropped an agent sentence with ungrounded numbers {missing}", missing=missing)
             if not deps.used_zigi:

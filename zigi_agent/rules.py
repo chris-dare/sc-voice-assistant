@@ -369,3 +369,19 @@ def state_from_dict(data: dict[str, Any] | None) -> ZigiState:
     return ZigiState(
         messages=[Message.from_dict(m) for m in data.get("messages") or []], waiting_for=str(data.get("waiting_for") or "none")
     )
+
+
+_MTN_TOPIC = re.compile(
+    r"\b(momo|mobile money|bundles?|data|airtime|credit|roaming|fib(re|er)|broadband|sim|puk|esim|5g|4g|ussd|"
+    r"short ?code|tariffs?|price|prices|cost|costs|charges?|fees?|how much|plans?|subscribe|unsubscribe|balance|"
+    r"loan|qwik ?loan|just4u|mashup|zone|turbonet|router|mifi|shop|branch|ported|porting|network|coverage|"
+    r"registration|ghana ?card|mtn)\b",
+    re.I,
+)
+_QUESTION = re.compile(r"\?|^\s*(what|how|which|where|when|why|who|can|could|do|does|is|are|tell me|explain)\b", re.I)
+_REPEAT = re.compile(r"\b(again|repeat|say that|come again|didn'?t (catch|hear)|last part|slower)\b", re.I)
+
+
+def asks_about_mtn(text: str) -> bool:
+    """A question about an MTN product or service: the answer must come from ZIGI (or its cached answer)."""
+    return bool(_MTN_TOPIC.search(text) and _QUESTION.search(text) and not _REPEAT.search(text))

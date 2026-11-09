@@ -50,6 +50,7 @@ class Expect:
     sent: list[str] | None = None  # exact
     never_sent: list[str] = field(default_factory=list)
     mentions: list[str] = field(default_factory=list)  # any of these, case-insensitive
+    silent: bool = False  # the last thing heard wasn't said to the agent: it should say nothing
 
 
 ENGINE: AgentEngine | None = None
@@ -137,6 +138,8 @@ class SoundsRight(Evaluator[Call, Heard, Expect]):
         said = ctx.output.said
         text = " ".join(said)
         words = len(text.split())
+        if ctx.metadata and ctx.metadata.silent:
+            return {"stayed_silent": not said and ctx.output.error is None}
         return {
             "said_something": bool(said) and ctx.output.error is None,
             "short": words <= 45,
@@ -151,6 +154,8 @@ class SoundsRight(Evaluator[Call, Heard, Expect]):
 class FastStart(Evaluator[Call, Heard, Expect]):
     def evaluate(self, ctx: EvaluatorContext[Call, Heard, Expect]) -> dict[str, float | bool]:
         first = ctx.output.first_ms
+        if ctx.metadata and ctx.metadata.silent:
+            return {}
         return {"first_word_ms": float(first or 0), "first_word_under_2s": first is not None and first < 2000}
 
 
@@ -173,6 +178,23 @@ dataset = Dataset[Call, Heard, Expect](
             name="remembers_location_for_fibre",
             inputs=Call(["Hey, I just moved to East Legon in Accra", "Is fibre available where I live?"]),
             metadata=Expect(route="zigi", mentions=["available", "east legon"]),
+        ),
+        Case(
+            # 09 Nov: a side conversation in the room was answered. These are said to someone else.
+            name="ignores_side_conversation",
+            inputs=Call(["How does roaming work?", "Ama, did you lock the front door before we left?"]),
+            metadata=Expect(route="ignored", sent=[], silent=True),
+        ),
+        Case(
+            name="ignores_half_sentence_between_others",
+            inputs=Call(["Hi", "no no, I told him to bring it tomorrow, he said"]),
+            metadata=Expect(route="ignored", sent=[], silent=True),
+        ),
+        Case(
+            # ...but an aside that is for the agent is still answered.
+            name="answers_an_aside_meant_for_it",
+            inputs=Call(["How does roaming work?", "sorry, my friend was talking. Can you say that again?"]),
+            metadata=Expect(route="direct", sent=[], mentions=["abroad", "135", "roam"]),
         ),
         Case(name="purchase_asks_otp", inputs=Call([BUY]), metadata=Expect(route="zigi", mentions=["otp", "code"])),
         Case(

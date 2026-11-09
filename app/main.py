@@ -161,6 +161,7 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
             "voice_modes": ["relay", "agent"] if s.agent_configured else ["relay"],
             "voice_mode_default": s.voice_mode_default if s.agent_configured else "relay",
             "noise_gate": s.noise_gate,
+            "voice_focus": s.voice_focus,
         }
 
     # ------------------------------------------------------------------ text mode

@@ -512,11 +512,19 @@ class VoiceClient {
     this.below = 0;
     this.preroll = [];
     this.sampleRate = 24000;
+    // Voice focus: the speaking level of the person holding the phone, learned from their speech. Other people
+    // in the room reach the mic 10 to 20 dB quieter, so only voices near this level open the mic (09 Nov: a
+    // side conversation and a second person were transcribed and answered).
+    this.voice = null;
+    this.segment = [];
+    this.lastOpen = performance.now();
   }
 
   async start() {
+    const focus = state.config.voice_focus !== false;
     this.micStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+      // Gain control lifts far voices toward the caller's level; with voice focus it stays off.
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: !focus, voiceIsolation: true, channelCount: 1 },
     });
     this.micCtx = new AudioContext({ sampleRate: 16000 });
     await this.micCtx.audioWorklet.addModule("/static/mic-worklet.js");
@@ -593,9 +601,13 @@ class VoiceClient {
   onFrame({ pcm, rms }) {
     if (this.muted || !this.ws || this.ws.readyState !== 1) return;
     const botTalking = this.state === "speaking" || this.playing;
-    const thr = Math.max(this.noise * 3.2, 0.012);
-    const bargeThr = Math.max(this.noise * 6, 0.04);
+    const focus = state.config.voice_focus !== false && this.voice !== null;
+    // Only voices within about 9 dB of the caller's own open the mic, and within 6 dB can interrupt.
+    const thr = Math.max(this.noise * 3.2, 0.012, focus ? this.voice * 0.35 : 0);
+    const bargeThr = Math.max(this.noise * 6, 0.04, focus ? this.voice * 0.5 : 0);
     if (!this.speaking) this.noise = this.noise * 0.97 + Math.min(rms, 0.05) * 0.03;
+    // If the caller has gone quiet for a while (moved the phone away), relax the focus slowly (halves in ~30 s).
+    if (focus && !this.speaking && performance.now() - this.lastOpen > 8000) this.voice *= 0.9995;
 
     if (botTalking && !this.bargeIn) {
       // Mic is gated while the assistant talks, so its own voice never reaches STT.
@@ -637,15 +649,31 @@ class VoiceClient {
         if (gate && this.gateBuf) { for (const p of this.gateBuf) this.ws.send(p); this.gateBuf = []; }
       }
     } else {
+      if (rms > thr) this.segment.push(rms);
       this.below = rms < thr * 0.7 ? this.below + 1 : 0;
       if (this.below >= 25) {
         this.speaking = false;
         this.bargeIn = false;
         this.below = 0;
+        this.learnVoice();
         this.send({ type: "speech_end", hangover_ms: 500 });
         this.markTurnEnd("voice", 500);
       }
     }
+  }
+
+  // After each stretch of speech: its typical loud level (75th percentile) updates the caller's voice level,
+  // unless it was much quieter than them (someone else in the room).
+  learnVoice() {
+    const seg = this.segment;
+    this.segment = [];
+    if (seg.length < 15) return; // under 0.3 s of voiced audio: a cough or a click
+    seg.sort((a, b) => a - b);
+    const level = seg[Math.floor(seg.length * 0.75)];
+    if (this.voice === null) this.voice = level;
+    else if (level >= this.voice * 0.5) this.voice = this.voice * 0.7 + level * 0.3;
+    else return;
+    this.lastOpen = performance.now();
   }
 
   markTurnEnd(input, hangoverMs = 0) {
@@ -655,6 +683,7 @@ class VoiceClient {
   }
 
   beginSpeech() {
+    this.segment = [];
     this.speaking = true;
     this.above = 0;
     this.below = 0;
@@ -691,6 +720,12 @@ class VoiceClient {
       case "bot_message":
         addMessage(ev.message);
         if (ev.speech) setCaption("bot", (ev.message.content && ev.message.content.text) || ev.speech, null, { append: true });
+        break;
+      case "turn_ignored":
+        // The agent judged that wasn't said to it (someone else in the room).
+        setCaption("user", "");
+        track("voice_turn_ignored", { mode: this.mode });
+        this.awaitingReply = false;
         break;
       case "agent_text":
         setCaption("bot", ev.text, null, { append: true });

@@ -99,6 +99,8 @@ class Settings(BaseSettings):
     voice_mode_default: Literal["relay", "agent"] = "relay"
     # Client sends silence instead of mic audio while its VAD hears no speech (background noise stays out of STT).
     noise_gate: bool = True
+    # Client learns the caller's speaking level and ignores voices well below it (others in the room)
+    voice_focus: bool = True
     # Commit the transcript this long after the client's end of speech if STT has not (noise can hold STT's VAD open).
     stt_force_commit_s: float = 1.0
 

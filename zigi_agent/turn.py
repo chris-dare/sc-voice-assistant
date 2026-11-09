@@ -34,6 +34,7 @@ from .agent import CallDeps
 from .persona import PUSH_NOTE, lead_in
 from .rules import asks_about_mtn, state_to_dict, ungrounded_numbers
 
+_SKIP = re.compile(r"^\W*skip\W*$", re.I)
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 _UNGROUNDED_NOTE = (
     "Your last draft said numbers or codes that did not come from ZIGI. Don't answer MTN facts yourself: "
@@ -97,6 +98,9 @@ async def _drive(
                     logfire.warn("agent draft had ungrounded numbers; asking Zigi instead")
                     extra = [*extra, _UNGROUNDED_NOTE]
             route = "push" if kind == "push" else ("zigi" if deps.used_zigi else "cache" if deps.cache_hits else "direct")
+            if state.get("skipped") and not state["said"] and route == "direct":
+                route = "ignored"
+                logfire.info("agent ignored speech that was not meant for it")
             span.set_attribute("route", route)
             await emit(
                 {
@@ -142,6 +146,9 @@ async def _stream(agent, deps, prompt, messages, extra, emit, state, t0):  # noq
     async def say(sentence: str, *, filler: bool = False) -> None:
         sentence = sentence.strip()
         if not sentence:
+            return
+        if _SKIP.match(sentence):
+            state["skipped"] = True  # not said to us: stay quiet (side conversations, 09 Nov)
             return
         if not filler and needs_zigi and not deps.used_zigi and not deps.cache_hits and not deps.answer_known and not state["said"]:
             # Seen 09 Nov: "Can you tell me what MoMo is?" was answered from the model's own knowledge.

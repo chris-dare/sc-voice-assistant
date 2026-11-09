@@ -662,6 +662,10 @@ class VoiceSession:
             turn.zigi_ms = (event.get("zigi_ms") or 0) / 1000
             turn.route = event.get("route") or turn.route
             turn.done = True
+            if turn.route == "ignored":
+                # The agent judged this wasn't said to it (someone else in the room): say nothing, keep listening.
+                await self.send({"type": "turn_ignored", "turn_id": turn.id})
+                return
             await self._report(turn)
 
     # ------------------------------------------------------------------ speaking

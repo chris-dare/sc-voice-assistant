@@ -36,7 +36,7 @@ from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from zigi_agent.rules import ZigiState, state_from_dict, state_to_dict
+from zigi_agent.rules import ZigiState, spoken_digits, state_from_dict, state_to_dict
 
 from . import telemetry
 from .agent_client import AgentServiceError
@@ -80,6 +80,8 @@ class Turn:
     done: bool = False  # agent: the service finished the turn (route known)
     filler_spoken: bool = False
     spoken: list[str] = field(default_factory=list)
+    note: str = ""  # agent: extra context for this turn (not the caller's words)
+    tts_cache_hits: int = 0  # sentences spoken from the TTS cache
 
 
 @dataclass
@@ -133,6 +135,8 @@ class VoiceSession:
         self.agent_phase = "idle"  # idle | llm | zigi: what the running agent turn is doing
         self.agent_turn: Turn | None = None  # the turn the agent is working on
         self.followups: list[Turn] = []  # caller turns heard while Zigi was busy
+        self.superseded = False  # the caller spoke over the agent's answer to Zigi's reply; it was not said
+        self.held: tuple[Turn, asyncio.Task[None]] | None = None  # a number the caller is still dictating
         self.grounding: list[str] = []  # Zigi's and the caller's words this call: what numbers may come from
 
     # ------------------------------------------------------------------ plumbing
@@ -335,15 +339,28 @@ class VoiceSession:
         await self.set_state("thinking")
         await self._relay_post(turn, source)
 
-    async def _agent_user_turn(self, turn: Turn, source: str) -> None:
+    async def _agent_user_turn(self, turn: Turn, source: str, release: bool = False) -> None:
         """Agentic mode: one turn at a time, so nothing reaches Zigi twice (seen 08 Nov: OTPs and questions sent twice
         when the caller spoke again, or a pause split a sentence, while the agent was still working)."""
         turn.route, turn.relay = "direct", False
+        piece = turn.text
+        if self.held is not None:
+            earlier, timer = self.held
+            self.held = None
+            timer.cancel()
+            turn.text = f"{earlier.text} {turn.text}"
+            turn.t_speech_end = earlier.t_speech_end or turn.t_speech_end
+        if not release and self._still_dictating(turn.text):
+            # Seen 09 Nov: a pause in "026 226 0 ... 986" sent half a number to Zigi. Wait briefly for the rest.
+            await self.send({"type": "transcript_final", "text": piece, "source": source, "turn_id": turn.id})
+            self.held = (turn, asyncio.create_task(self._release_held(turn, source)))
+            return
         if not await self._turn_allowed():
             return
         busy = self.agent_task is not None and not self.agent_task.done()
         await self._interrupt(silent=True, keep_agent=busy and self.agent_phase == "zigi")
-        await self.send({"type": "transcript_final", "text": turn.text, "source": source, "turn_id": turn.id})
+        if not release:
+            await self.send({"type": "transcript_final", "text": piece, "source": source, "turn_id": turn.id})
         await self.set_state("thinking")
         if busy and self.agent_phase == "zigi":
             # Zigi is already working on the last request: hear the answer first, then take this as the next turn.
@@ -354,6 +371,24 @@ class VoiceSession:
             turn.text = f"{self.agent_turn.text} {turn.text}"
             turn.t_speech_end = turn.t_speech_end or self.agent_turn.t_speech_end
         self.jobs.put_nowait(("user", turn))
+
+    def _still_dictating(self, text: str) -> bool:
+        """Zigi wants a phone number or code and the caller has given only part of it so far."""
+        waiting = self.zigi.waiting_for
+        digits = spoken_digits(text)
+        if waiting not in {"phone_number", "otp"} or not digits:
+            return False
+        if waiting == "otp":
+            return len(digits) < 4
+        if digits.startswith("233"):
+            return len(digits) < 12
+        return len(digits) < (10 if digits.startswith("0") else 9)
+
+    async def _release_held(self, turn: Turn, source: str) -> None:
+        await asyncio.sleep(self.cfg.agent_dictation_wait_s)
+        if self.held is not None and self.held[0] is turn:
+            self.held = None
+            await self._agent_user_turn(turn, source, release=True)
 
     async def _turn_allowed(self) -> bool:
         if self.svc.limits is None:
@@ -482,6 +517,12 @@ class VoiceSession:
                 first, *rest = self.followups
                 self.followups = []
                 first.text = " ".join(t.text for t in [first, *rest])
+                if self.superseded:
+                    first.note = (
+                        "The caller spoke again while you were waiting for ZIGI, so your previous reply was NOT said "
+                        "aloud. Respond to what they say now; use ZIGI's last reply only where it still answers them."
+                    )
+                self.superseded = False
                 self.turn = first
                 self.jobs.put_nowait(("user", first))
                 continue
@@ -525,6 +566,7 @@ class VoiceSession:
             "grounding": self.grounding[-80:],
             "memory": self.memory,
             "sends": self.sends,
+            "note": turn.note,
         }
         assert self.svc.agent is not None
         stream = self.svc.agent.turn(request)
@@ -558,8 +600,12 @@ class VoiceSession:
                 turn.t_llm_first = time.monotonic()
             if not speech:
                 return
-            turn.spoken.append(text)
             filler = bool(event.get("filler"))
+            if self.followups and not filler and turn.t_tool_start is not None:
+                # The caller has already said something newer: don't answer the older request out loud.
+                self.superseded = True
+                return
+            turn.spoken.append(text)
             turn.filler_spoken |= filler
             await self.send({"type": "agent_text", "turn_id": turn.id, "text": text, "filler": filler})
             item_id = f"{'hold' if filler else 'agent'}-{turn.id}-{len(turn.spoken)}"
@@ -638,6 +684,8 @@ class VoiceSession:
                     with contextlib.suppress(Exception):  # a cache outage must not stop speech
                         hit = await self.svc.cache.get(key)
                 if hit:
+                    if item.turn is not None:
+                        item.turn.tts_cache_hits += 1
                     out.put_nowait(hit[0])
                     return
                 buf = bytearray()
@@ -735,6 +783,7 @@ class VoiceSession:
         metrics = {
             "type": "metrics",
             "turn_id": turn.id,
+            "tts_cache_hits": turn.tts_cache_hits,
             "mode": self.mode,
             "route": turn.route,
             "stt_ms": ms(turn.t_speech_end, turn.t_final),
@@ -769,6 +818,7 @@ class VoiceSession:
         metrics = {
             "type": "metrics",
             "turn_id": turn.id,
+            "tts_cache_hits": turn.tts_cache_hits,
             "mode": self.mode,
             "route": turn.route,
             "stt_ms": ms(turn.t_speech_end, turn.t_final),

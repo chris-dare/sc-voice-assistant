@@ -1,7 +1,8 @@
 import os
 
 # Keep test runs out of Logfire, whatever keys the shell has.
-for _var in ("LOGFIRE_TOKEN", "LOGFIRE_API_KEY"):
+# Tests use in-memory state and fakes, never the real Redis or vendor URLs from the shell.
+for _var in ("LOGFIRE_TOKEN", "LOGFIRE_API_KEY", "REDIS_URL", "AGENT_SERVICE_URL", "SUNCO_DELIVERY"):
     os.environ.pop(_var, None)
 
 import pytest

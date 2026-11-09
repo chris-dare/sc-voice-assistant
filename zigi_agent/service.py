@@ -43,6 +43,7 @@ class TurnRequest(BaseModel):
     grounding: list[str] = Field(default_factory=list)
     memory: dict[str, str] = Field(default_factory=dict)
     sends: list[dict[str, Any]] = Field(default_factory=list)
+    note: str = ""  # from the gateway, e.g. the caller spoke over the last reply
 
 
 class AgentEngine:
@@ -103,7 +104,7 @@ class AgentEngine:
             cache=self.cache,
             emit=_noop,
         )
-        async for event in run_turn(self.agent, deps, kind=req.kind, text=req.text, history=req.history):
+        async for event in run_turn(self.agent, deps, kind=req.kind, text=req.text, history=req.history, note=req.note):
             yield event
 
     async def aclose(self) -> None:
@@ -124,6 +125,10 @@ def create_app(settings: AgentSettings | None = None) -> FastAPI:
         # Prompts, replies and tool arguments carry what callers said: keep them out of traces (design 6.2).
         logfire.instrument_pydantic_ai(include_content=False)
         logfire.instrument_httpx(capture_headers=False)
+        # Our own log lines (Redis status, cache, guardrails) go to Logfire too.
+        logging.basicConfig(level=logging.INFO, handlers=[logfire.LogfireLoggingHandler()], force=True)
+        for noisy in ("httpx", "httpcore"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
         app.state.engine = AgentEngine(cfg)
         yield
         await app.state.engine.aclose()

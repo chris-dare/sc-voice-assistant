@@ -54,6 +54,8 @@ class CallDeps:
     skip: list[re.Pattern[str]]
     preamble: list[re.Pattern[str]]
     emit: Callable[[dict[str, Any]], Awaitable[None]]
+    # Set by turn._stream: speak a lead-in now (only if nothing was said yet this turn).
+    lead: Callable[[str], Awaitable[None]] | None = None
     bus: Bus | None = None
     cache: SemanticCache | None = None
     cache_hits: int = 0
@@ -209,7 +211,7 @@ zigi_tools: Capability[CallDeps] = Capability(
 
 
 @zigi_tools.tool
-async def ask_zigi(ctx: RunContext[CallDeps], text: str) -> str:
+async def ask_zigi(ctx: RunContext[CallDeps], text: str, lead_in: str = "") -> str:
     """Send a message to ZIGI, MTN's chatbot, as the caller, and get ZIGI's reply.
 
     Use it for any MTN question or transaction, or to answer a question ZIGI asked.
@@ -217,6 +219,8 @@ async def ask_zigi(ctx: RunContext[CallDeps], text: str) -> str:
     Args:
         text: The message in the exact form ZIGI expects: a clear question, or only the OTP digits, phone number,
             amount, or Yes/No.
+        lead_in: What you say to the caller while you check: a few natural words, like a person on the phone
+            ("Sure, one moment.", "Okay, let me check North Legon for you."). Vary it. Empty if nothing fits.
     """
     deps = ctx.deps
     cacheable = deps.cache is not None and question_cacheable(text, deps.zigi.waiting_for)
@@ -241,15 +245,19 @@ async def ask_zigi(ctx: RunContext[CallDeps], text: str) -> str:
             result = {}
         if answer_cacheable(result):
             await deps.cache.store_answer(text, {k: v for k, v in result.items() if k != "note"}, vec)
+            logfire.info("semantic cache stored an answer")
+        else:
+            logfire.info("semantic cache: answer not cacheable")
     return out
 
 
 @zigi_tools.tool
-async def choose_option(ctx: RunContext[CallDeps], option: str) -> str:
+async def choose_option(ctx: RunContext[CallDeps], option: str, lead_in: str = "") -> str:
     """Pick one of the options ZIGI offered in its last reply, exactly as a tap would.
 
     Args:
         option: The option's text, as listed in ZIGI STATE.
+        lead_in: A few natural words to say while you do it ("Okay, one sec."). Empty if nothing fits.
     """
     pick = _find_option(ctx.deps.zigi, option)
     assert pick is not None  # ZigiGuardrails checked it
@@ -290,6 +298,7 @@ class ZigiGuardrails(AbstractCapability[CallDeps]):
                 )
             if waiting in {"otp", "phone_number"}:
                 logfire.info("agent sends {waiting} {masked}", waiting=waiting, masked=mask_digits(text or ""))
+            await self._lead(deps, args)
             return {**args, "text": text}
         if call.tool_name == "choose_option":
             pick = _find_option(deps.zigi, str(args.get("option") or ""))
@@ -298,12 +307,14 @@ class ZigiGuardrails(AbstractCapability[CallDeps]):
                 self._refuse(deps, call.tool_name, f"That is not one of ZIGI's options. The options are: {names}.")
             elif waiting == "confirmation" and is_affirmative(str(pick["text"])) and not is_affirmative(deps.user_said):
                 self._refuse(deps, call.tool_name, "The caller has not said yes in this turn. Ask them and wait for their answer.")
+            await self._lead(deps, args)
             return args
         if call.tool_name == "web_fetch":
             url = str(args.get("url") or "").strip().rstrip(".,;:")
             zigi_links = {u for t in deps.grounding for u in links_in(t)}
             if url not in zigi_links:
                 self._refuse(deps, call.tool_name, "Only links that ZIGI sent in this call can be opened.")
+            await self._lead(deps, {})
             return {**args, "url": url}
         return args
 
@@ -313,6 +324,11 @@ class ZigiGuardrails(AbstractCapability[CallDeps]):
         if call.tool_name == "web_fetch":
             ctx.deps.grounding.append(str(getattr(result, "content", result))[:8000])
         return result
+
+    @staticmethod
+    async def _lead(deps: CallDeps, args: ValidatedToolArgs) -> None:
+        if deps.lead is not None:
+            await deps.lead(str(args.get("lead_in") or "").strip())
 
     @staticmethod
     def _refuse(deps: CallDeps, tool: str, reason: str) -> None:

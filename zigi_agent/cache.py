@@ -35,6 +35,11 @@ _ANSWER_UNSAFE = re.compile(
     r"otp|logging you in|reply yes|confirm)\b|\bHi [A-Z]{3,}\b",
     re.I,
 )
+_ASKS = re.compile(
+    r"\b(please (enter|provide|share|tell|send|select|choose|reply|let me know)|let me know|which (area|town|one|option)|"
+    r"what (area|town|is your)|kindly (enter|provide|share))\b",
+    re.I,
+)
 _WORD = re.compile(r"[a-z0-9]+")
 _STOP = {
     "the",
@@ -73,12 +78,18 @@ def question_cacheable(text: str, waiting_for: str) -> bool:
 def answer_cacheable(result: dict[str, Any]) -> bool:
     msgs = result.get("zigi_messages") or []
     text = " ".join(m.get("text", "") for m in msgs)
+    last = (msgs[-1].get("text", "") if msgs else "").strip()
     return (
         bool(msgs)
         and not result.get("timed_out")
         and result.get("waiting_for") == "none"
         and len(text) >= 40
         and not _ANSWER_UNSAFE.search(text)
+        # An answer that asks the caller something is the start of a flow, not an answer (seen 09 Nov in the evals:
+        # "Which area or town should I check?" was served from cache to the next caller).
+        and not last.rstrip().endswith("?")
+        and not _ASKS.search(text)
+        and not result.get("options")
     )
 
 

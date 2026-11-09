@@ -121,6 +121,12 @@ class OnTopic(Evaluator[Call, Heard, Expect]):
 
 _CORPORATE = re.compile(r"happy to (help|assist)|anything else i can help|is there anything else|as an ai|zigi says|the system says", re.I)
 _URL = re.compile(r"https?://|www\.|\.com\b|\.gh\b")
+# The agent narrating its own process instead of talking to the caller (09 Nov call).
+_NARRATION = re.compile(
+    r"looks like|i heard \w+ digits|couldn'?t (check|confirm|get)|the (checker|system|bot)|rejected|let me try again|"
+    r"x{3,}|zigi",
+    re.I,
+)
 
 
 @dataclass
@@ -136,6 +142,7 @@ class SoundsRight(Evaluator[Call, Heard, Expect]):
             "short": words <= 45,
             "no_urls": not _URL.search(text),
             "not_corporate": not _CORPORATE.search(text),
+            "no_narration": not _NARRATION.search(text),
             "numbers_grounded": all(not ungrounded_numbers(s, ctx.output.grounding) for s in said),
         }
 

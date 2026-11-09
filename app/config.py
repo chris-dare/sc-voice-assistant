@@ -94,6 +94,8 @@ class Settings(BaseSettings):
     # Wait this long for the agent's first event (it has its own model fallback inside) before relaying the turn.
     agent_first_event_timeout_s: float = 8.0
     agent_quiet_s: float = 1.2  # a Zigi message burst that arrives on its own is complete after this much silence
+    # Wait this long for the rest of a phone number or code the caller paused in the middle of
+    agent_dictation_wait_s: float = 3.0
     voice_mode_default: Literal["relay", "agent"] = "relay"
     # Client sends silence instead of mic audio while its VAD hears no speech (background noise stays out of STT).
     noise_gate: bool = True

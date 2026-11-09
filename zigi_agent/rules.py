@@ -27,6 +27,7 @@ _CONFIRM = re.compile(
     r"\b(confirm|yes or no|reply yes|reply with yes|do you want to proceed|would you like to proceed|shall i proceed|are you sure)\b", re.I
 )
 _NUMBERED = re.compile(r"(?m)^\s*\d+[.)]\s+\S")
+_EXAMPLE = re.compile(r"^(for example|e\.g\.|eg|example|format)\b|X{3,}", re.I)
 
 
 @dataclass
@@ -60,6 +61,12 @@ def _ask(text: str) -> str:
     Instructions such as "3. Enter your phone number." inside a numbered how-to are not a request.
     """
     lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+    # A trailing format hint or example belongs to the request above it (seen 09 Nov: "Please enter your phone
+    # number in the format:" then "024XXXXXXX or 23324XXXXXX" was read as no request at all).
+    if len(lines) > 1 and lines[-2].endswith(":"):
+        lines = [*lines[:-2], f"{lines[-2]} {lines[-1]}"]
+    elif len(lines) > 1 and _EXAMPLE.search(lines[-1]):
+        lines = lines[:-1]
     if not lines:
         return ""
     last = lines[-1]
@@ -183,8 +190,39 @@ def shape_input(text: str, waiting_for: str, user_said: str) -> tuple[str | None
     text = text.strip()
     if not text:
         return None, "Empty message. Ask the user what they need."
+    what = "one-time code" if waiting_for == "otp" else "phone number"
+    if waiting_for not in {"otp", "phone_number", "amount"} and re.fullmatch(r"[\d\s.,-]{4,}", text):
+        # Seen 09 Nov: an OTP the caller repeated after the check had finished went to Zigi three more times.
+        return (
+            None,
+            "ZIGI is not asking for a code or number right now, so don't send one. If the caller repeated an old code, "
+            "tell them that step is already done and ask what they'd like next.",
+        )
     if waiting_for in {"otp", "phone_number"} and not spoken_digits(text) and not spoken_digits(user_said):
-        return text, None  # no number at all: the user moved on to something else, so pass it through
+        if is_affirmative(text) or _NEGATIVE.fullmatch(_plain(text)):
+            return None, f"ZIGI is waiting for the caller's {what}, not a yes or no. Ask the caller for their {what}."
+        if _META.search(text):
+            return (
+                None,
+                f"Don't ask ZIGI about its own steps. ZIGI is waiting for the caller's {what}: ask the caller for it, "
+                "or answer them yourself from the conversation.",
+            )
+        if _plain(text) in _STOP_WORDS or _STOP.search(text):
+            # Probed 09 Nov: mid-login, Zigi ignores "cancel" (no reply for 46 s) and answers "menu" with the same
+            # prompt. There is no way out of the step, so never send these.
+            return (
+                None,
+                f"That step can't be cancelled part way, so don't send that. Tell the caller kindly that you need their "
+                f"{what} to finish this check before you can look anything else up, and that it's fine to give it "
+                "whenever they're ready.",
+            )
+        # Seen 09 Nov: an e-shop question sent mid-login cost 46 s and Zigi only asked for the number again.
+        return (
+            None,
+            f"ZIGI is in the middle of a step and is waiting for the caller's {what}; it won't answer anything else "
+            "until that's done or cancelled. Tell the caller you'll help with their question right after, and ask "
+            f"for their {what}. If they want to stop, send cancel.",
+        )
     if waiting_for == "otp":
         digits = spoken_digits(text) or spoken_digits(user_said)
         if 4 <= len(digits) <= 8:
@@ -205,7 +243,8 @@ def shape_input(text: str, waiting_for: str, user_said: str) -> tuple[str | None
             return "0" + digits, None
         return (
             None,
-            f"Zigi is waiting for a ten digit phone number starting with zero, and I heard {len(digits)} digits. Ask the user to say it again, digit by digit.",
+            f"Zigi is waiting for a ten digit phone number starting with zero, and I heard {len(digits)} digits. "
+            "If they stopped part way, ask for the rest of it; otherwise ask them to say it again slowly.",
         )
     if waiting_for == "amount":
         m = re.search(r"\d+(?:\.\d{1,2})?", text.replace(",", ""))
@@ -218,6 +257,22 @@ def shape_input(text: str, waiting_for: str, user_said: str) -> tuple[str | None
             "Zigi is asking the user to confirm. The user has not said yes in this turn. Read Zigi's question to the user and wait for their answer.",
         )
     return text, None
+
+
+_NEGATIVE = re.compile(r"(no|nope|nah|no thanks|not now)")
+_META = re.compile(r"\b(why|explain|rejected|reject|didn'?t (work|accept)|not (working|accepted)|wrong format|what happened)\b", re.I)
+
+
+_STOP_WORDS = {"cancel", "stop", "menu", "main menu", "exit", "quit"}
+_STOP = re.compile(
+    r"\b(cancel|stop|forget (it|that|the|about)|never ?mind|leave (it|that|the)|skip (it|that|the)|quit|exit|start over|"
+    r"main menu|don'?t want|do not want|not interested|move on)\b",
+    re.I,
+)
+
+
+def _plain(text: str) -> str:
+    return re.sub(r"[^a-z ]+", "", text.lower()).strip()
 
 
 _URL = re.compile(r"https?://[^\s)\]>\"']+")

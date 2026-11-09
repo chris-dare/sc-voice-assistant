@@ -48,7 +48,11 @@ def test_otp_is_reduced_to_digits_or_refused():
     sent, refusal = shape_input("it's one two", "otp", "it's one two")
     assert sent is None and "digit" in refusal
     # No number at all: the user changed the subject, so it goes to Zigi as said.
-    assert shape_input("I don't have it", "otp", "I don't have it") == ("I don't have it", None)
+    # Mid-step, anything else is answered by the agent itself (Zigi would only ask for the code again)...
+    sent, refusal = shape_input("I don't have it", "otp", "I don't have it")
+    assert sent is None and "cancel" in refusal
+    # Zigi can't leave a step (probed 09 Nov), so "cancel" is never sent mid-step either.
+    assert shape_input("cancel", "otp", "cancel")[0] is None
 
 
 def test_phone_number_is_normalised():
@@ -213,5 +217,41 @@ def test_speaking_again_while_zigi_works_never_sends_twice(agent_client):
             m = ws.receive()
             if m.get("text"):
                 events.append(json.loads(m["text"]))
-        events += run_turn(ws, "How does roaming work?", lambda ev: sum(e["type"] == "metrics" for e in ev) >= 2 and has_metrics(ev))
+        events += run_turn(ws, "How does roaming work?", has_metrics)
     assert sent_to_zigi(events).count("How does roaming work?") == 1
+    # The answer to the first ask was not spoken over the caller's newer words: only the latest turn speaks.
+    first = next(e["turn_id"] for e in events if e["type"] == "transcript_final")
+    assert not [e for e in events if e["type"] == "agent_text" and e["turn_id"] == first and not e.get("filler")]
+
+
+def test_issues_from_the_09_nov_call():
+    """Each line is something that went wrong on the 09 Nov fibre call."""
+    from zigi_agent.rules import _ask
+
+    # Zigi's request ended with a format line, so "waiting for a phone number" was missed.
+    ask = _ask("Please enter your phone number in the format:\n024XXXXXXX or 23324XXXXXX")
+    assert "phone number" in ask
+    assert classify_waiting([msg("Please enter your phone number in the format:\n024XXXXXXX or 23324XXXXXX")]) == "phone_number"
+    # Half a number, a "Yes", and "why was it rejected?" all reached Zigi while it waited for the number.
+    assert shape_input("026-226-0-", "phone_number", "026 226 0")[0] is None
+    assert shape_input("Yes", "phone_number", "yes")[0] is None
+    assert shape_input("Could you explain why the checker rejected my number?", "phone_number", "why")[0] is None
+    # After the check had finished, an old OTP was sent three more times.
+    assert shape_input("606461", "none", "606461")[0] is None
+    assert shape_input("2", "menu_choice", "2") == ("2", None)
+    # The agent cancelled the check on its own when the caller only asked about something else.
+    assert shape_input("cancel", "phone_number", "What can I buy on the MTN e-shop?")[0] is None
+    assert shape_input("cancel", "phone_number", "forget it, never mind")[0] is None
+
+
+def test_a_code_said_in_two_parts_reaches_zigi_once_whole():
+    """Seen 09 Nov: a pause mid-number sent half of it to Zigi. The gateway now waits briefly for the rest."""
+    app = create_app(mock_settings(agent_mode_enabled=True, agent_quiet_s=0.2, agent_dictation_wait_s=1.0))
+    with TestClient(app) as c:
+        token = c.post("/v1/session", json={}).json()["token"]
+        with c.websocket_connect(f"/v1/voice/session?token={token}&mode=agent") as ws:
+            ws.receive_text()
+            run_turn(ws, "I want to buy a data bundle", has_metrics)
+            ws.send_text(json.dumps({"type": "text", "text": "it's four five"}))
+            ev = run_turn(ws, "one two nine", has_metrics)
+    assert sent_to_zigi(ev) == ["45129"]

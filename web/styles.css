@@ -194,6 +194,16 @@ h1 { font-size: 17px; margin: 0; font-weight: 800; letter-spacing: -0.01em; }
   padding: 6px 20px 8px; text-align: center; display: flex; flex-direction: column; gap: 8px;
 }
 .caption { margin: 0 auto; max-width: 360px; overflow-wrap: anywhere; }
+/* What the caller is doing (structured task from the agent): a compact card above the captions. */
+.task-card {
+  flex: none; margin: 0 16px 4px; padding: 10px 14px; max-width: 360px; align-self: center; width: calc(100% - 32px);
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; font-size: 14px;
+}
+.task-card h3 { margin: 0 0 4px; font-size: 13px; display: flex; justify-content: space-between; gap: 8px; }
+.task-card .status { color: var(--muted); font-weight: 600; }
+.task-card dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
+.task-card dt { color: var(--muted); }
+.task-card dd { margin: 0; overflow-wrap: anywhere; }
 .caption:empty { display: none; }
 .caption.user { color: var(--muted); font-style: italic; }
 .caption.bot { font-size: 15px; display: flex; flex-direction: column; gap: 6px; }

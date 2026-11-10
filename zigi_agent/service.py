@@ -45,6 +45,7 @@ class TurnRequest(BaseModel):
     sends: list[dict[str, Any]] = Field(default_factory=list)
     note: str = ""  # from the gateway, e.g. the caller spoke over the last reply
     last_reply: str = ""  # what the agent said to the caller last turn
+    task: dict[str, Any] | None = None  # the structured task record (tasks.py)
 
 
 class AgentEngine:
@@ -75,6 +76,16 @@ class AgentEngine:
 
             reader_settings = {**model_settings(settings), "max_tokens": 400}
             self.reader = ZigiReader(build_model(settings, settings.zigi_reader_model), settings.zigi_reader_timeout_s, reader_settings)
+        self.tracker = None
+        if settings.task_tracker_enabled and not settings.mock_providers and settings.openrouter_api_key:
+            from .agent import build_model, model_settings
+            from .tasks import TaskTracker
+
+            self.tracker = TaskTracker(
+                build_model(settings, settings.zigi_reader_model),
+                settings.zigi_reader_timeout_s,
+                {**model_settings(settings), "max_tokens": 400},
+            )
         self.skip = [re.compile(p, re.IGNORECASE) for p in settings.speech_skip_patterns]
         self.preamble = [re.compile(p, re.IGNORECASE) for p in settings.zigi_preamble_patterns]
         self.bus = bus if bus is not None else (RedisBus(settings.redis_url) if settings.redis_url else None)
@@ -112,6 +123,8 @@ class AgentEngine:
             cache=self.cache,
             reader=self.reader,
             last_reply=req.last_reply[:1000],
+            task=req.task,
+            tracker=self.tracker,
             emit=_noop,
         )
         async for event in run_turn(self.agent, deps, kind=req.kind, text=req.text, history=req.history, note=req.note):

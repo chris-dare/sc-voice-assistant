@@ -141,6 +141,7 @@ class VoiceSession:
         self.recent_spoken: list[tuple[float, str]] = []  # what we said lately, to drop echoes of it
         self.ignored_in_a_row = 0
         self.last_reply = ""  # what the agent last said (not lead-ins), sent with the next turn
+        self.task: dict[str, Any] | None = None  # structured record of a known use case, from the agent service
         self.superseded = False  # the caller spoke over the agent's answer to Zigi's reply; it was not said
         self.held: tuple[Turn, asyncio.Task[None]] | None = None  # a number the caller is still dictating
         self.grounding: list[str] = []  # Zigi's and the caller's words this call: what numbers may come from
@@ -180,6 +181,8 @@ class VoiceSession:
             }
         )
         await self.send({"type": "state", "state": "listening"})
+        if self.task:
+            await self.send({"type": "task", "task": self.task})  # e.g. after a reconnect
         async with self.svc.bus.subscribe(channel_for(self.ctx.conversation_id)) as sub, self.svc.watcher.watch(self.ctx.conversation_id):
             tasks = [
                 asyncio.create_task(self._recv_loop(), name="recv"),
@@ -367,11 +370,11 @@ class VoiceSession:
         if not await self._turn_allowed():
             return
         busy = self.agent_task is not None and not self.agent_task.done()
-        await self._interrupt(silent=True, keep_agent=busy and self.agent_phase == "zigi")
+        await self._interrupt(silent=True, keep_agent=busy and self.agent_phase in {"zigi", "tracking"})
         if not release:
             await self.send({"type": "transcript_final", "text": piece, "source": source, "turn_id": turn.id})
         await self.set_state("thinking")
-        if busy and self.agent_phase == "zigi":
+        if busy and self.agent_phase in {"zigi", "tracking"}:
             # Zigi is already working on the last request: hear the answer first, then take this as the next turn.
             self.followups.append(turn)
             return
@@ -427,6 +430,7 @@ class VoiceSession:
                 self.memory = dict(data.get("memory") or {})
                 self.sends = list(data.get("sends") or [])
                 self.zigi_seen = set(data.get("zigi_seen") or [])
+                self.task = data.get("task")
                 return
         await self._zigi_state_from_sunco()
 
@@ -463,6 +467,7 @@ class VoiceSession:
             "memory": self.memory,
             "sends": self.sends,
             "zigi_seen": sorted(self.zigi_seen)[-200:],
+            "task": self.task,
         }
         with contextlib.suppress(Exception):
             await self.svc.store.set_json(self._state_key(), state, self.cfg.call_state_ttl_s)
@@ -610,6 +615,7 @@ class VoiceSession:
             "sends": self.sends,
             "note": turn.note,
             "last_reply": self.last_reply,
+            "task": self.task,
         }
         assert self.svc.agent is not None
         stream = self.svc.agent.turn(request)
@@ -665,6 +671,8 @@ class VoiceSession:
                 else:
                     self.agent_phase = "llm"
                     turn.t_tool_end = time.monotonic()
+        elif kind == "tracking":
+            self.agent_phase = "tracking"  # the reply is said; the task record is being updated
         elif kind == "zigi_posted":
             message = event["message"]
             self.seen.add(message["id"])
@@ -679,6 +687,10 @@ class VoiceSession:
             self.zigi_seen.update(event.get("zigi_seen") or [])
             self.memory = dict(event.get("memory") or self.memory)
             self.sends = list(event.get("sends") or self.sends)
+            task = event.get("task")
+            if task != self.task:
+                self.task = task
+                await self.send({"type": "task", "task": task})
             await self._save_call_state()
             turn.zigi_ms = (event.get("zigi_ms") or 0) / 1000
             turn.route = event.get("route") or turn.route

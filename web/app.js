@@ -721,6 +721,9 @@ class VoiceClient {
         addMessage(ev.message);
         if (ev.speech) setCaption("bot", (ev.message.content && ev.message.content.text) || ev.speech, null, { append: true });
         break;
+      case "task":
+        showTask(ev.task);
+        break;
       case "turn_ignored":
         // The agent judged that wasn't said to it (someone else in the room). Say so quietly, so the caller
         // knows to repeat it if it was meant for the assistant.
@@ -1005,3 +1008,51 @@ window.addEventListener("unhandledrejection", (e) => track("client_error", { kin
     toast("Can't reach the assistant right now.");
   }
 })();
+
+
+// ---------------------------------------------------------------- structured task card (design 5.8.6)
+const TASK_TITLES = {
+  bundle_purchase: "Buying a bundle", fibre_check: "Fibre check", puk: "Getting your PUK", balance: "Checking your balance",
+  momo_statement: "MoMo statement", airtime_purchase: "Buying airtime", other: "Your request",
+};
+const TASK_STATUS = {
+  collecting: "In progress", confirming: "Waiting for your OK", in_progress: "Processing", done: "Done", failed: "Didn't go through",
+  abandoned: "Cancelled",
+};
+const TASK_FIELDS = [
+  ["bundle", "Bundle"], ["price", "Price"], ["recipient", "For"], ["recipient_number", "Number"], ["amount", "Amount"],
+  ["area", "Area"], ["outcome", "Result"],
+];
+let lastTask = null;
+
+function showTask(task) {
+  const card = $("task-card");
+  if (!card) return;
+  const before = lastTask;
+  lastTask = task;
+  // Analytics: one event per status change, so completion and drop-off per use case can be measured.
+  if (task && (!before || before.kind !== task.kind || before.status !== task.status)) {
+    track("task_status", { kind: task.kind, status: task.status, previous: before && before.kind === task.kind ? before.status : null });
+  }
+  if (!task || task.status === "abandoned") { card.hidden = true; card.textContent = ""; return; }
+  card.textContent = "";
+  const h = document.createElement("h3");
+  const title = document.createElement("span");
+  title.textContent = TASK_TITLES[task.kind] || "Your request";
+  const status = document.createElement("span");
+  status.className = "status";
+  status.textContent = TASK_STATUS[task.status] || "";
+  h.append(title, status);
+  card.appendChild(h);
+  const dl = document.createElement("dl");
+  for (const [key, label] of TASK_FIELDS) {
+    if (!task[key]) continue;
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    dd.textContent = key === "recipient" ? (task[key] === "self" ? "You" : "Someone else") : task[key];
+    dl.append(dt, dd);
+  }
+  if (dl.childElementCount) card.appendChild(dl);
+  card.hidden = false;
+}

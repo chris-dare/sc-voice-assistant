@@ -43,6 +43,7 @@ class Heard:
     grounding: list[str] = field(default_factory=list)
     error: str | None = None
     refusals: int = 0  # guardrail refusals over the whole call: the over-blocking measure
+    task: dict[str, Any] | None = None  # the structured task record after the call
 
 
 @dataclass
@@ -52,6 +53,7 @@ class Expect:
     never_sent: list[str] = field(default_factory=list)
     mentions: list[str] = field(default_factory=list)  # any of these, case-insensitive
     silent: bool = False  # the last thing heard wasn't said to the agent: it should say nothing
+    task: dict[str, str] | None = None  # expected fields of the task record at the end, e.g. {"kind": "puk"}
 
 
 ENGINE: AgentEngine | None = None
@@ -67,6 +69,7 @@ async def run_call(call: Call) -> Heard:
     heard = Heard()
     refusals = 0
     last_reply = ""
+    task: dict[str, Any] | None = None
     for i, text in enumerate(call.utterances):
         last = i == len(call.utterances) - 1
         heard = Heard() if last else heard
@@ -81,6 +84,7 @@ async def run_call(call: Call) -> Heard:
                 grounding=grounding,
                 memory=memory,
                 last_reply=last_reply,
+                task=task,
             )
         ):
             if ev["type"] == "say":
@@ -95,9 +99,11 @@ async def run_call(call: Call) -> Heard:
                 heard.grounding = grounding
                 refusals += int(ev.get("refusals") or 0)
                 last_reply = " ".join(heard.said) or last_reply
+                task = ev.get("task")
             elif ev["type"] == "error":
                 heard.error = ev.get("text")
     heard.refusals = refusals
+    heard.task = task
     return heard
 
 
@@ -161,6 +167,18 @@ class SoundsRight(Evaluator[Call, Heard, Expect]):
             "no_narration": not _NARRATION.search(text),
             "numbers_grounded": all(not ungrounded_numbers(s, ctx.output.grounding) for s in said),
         }
+
+
+@dataclass
+class TaskRecorded(Evaluator[Call, Heard, Expect]):
+    """The structured task record (tasks.py) ends up as expected: kind, status and key fields."""
+
+    def evaluate(self, ctx: EvaluatorContext[Call, Heard, Expect]) -> dict[str, bool]:
+        exp = ctx.metadata
+        if not exp or not exp.task:
+            return {}
+        got = ctx.output.task or {}
+        return {"task": all(v.lower() in str(got.get(k, "")).lower() for k, v in exp.task.items())}
 
 
 @dataclass
@@ -238,13 +256,13 @@ dataset = Dataset[Call, Heard, Expect](
         Case(
             name="unseen_flow_puk",
             inputs=Call(["I need my PUK, my SIM is locked", "it's 0244123456"]),
-            metadata=Expect(route="zigi", sent=["0244123456"], mentions=["puk", "1234"]),
+            metadata=Expect(route="zigi", sent=["0244123456"], mentions=["puk", "1234"], task={"kind": "puk", "status": "done"}),
         ),
         Case(
             # 10 Nov: a choice said as an ordinal, then "for me", must reach Zigi as "1" and "Myself".
             name="ordinal_choice",
             inputs=Call(["Show me the data bundles", "The first one please", "It's for me"]),
-            metadata=Expect(sent=["Myself"], mentions=["added", "done"]),
+            metadata=Expect(mentions=["added", "done"], task={"kind": "bundle_purchase", "status": "done", "recipient": "self"}),
         ),
         Case(
             # 10 Nov: read-back then yes. "Which is the cheapest?" -> offered one -> "Yes" is a choice.
@@ -275,7 +293,7 @@ dataset = Dataset[Call, Heard, Expect](
             metadata=Expect(route="zigi", sent=["yes"], mentions=["done", "added", "1gb"]),
         ),
     ],
-    evaluators=[RightRoute(), ZigiGotExactInput(), OnTopic(), SoundsRight(), NotOverBlocked(), FastStart()],
+    evaluators=[RightRoute(), ZigiGotExactInput(), OnTopic(), SoundsRight(), NotOverBlocked(), TaskRecorded(), FastStart()],
 )
 
 

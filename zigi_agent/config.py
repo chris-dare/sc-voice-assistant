@@ -49,6 +49,8 @@ class AgentSettings(BaseSettings):
     zigi_reader_enabled: bool = True
     zigi_reader_model: str = "openai/gpt-6-luna"
     zigi_reader_timeout_s: float = 4.0
+    # Structured record of known use cases (tasks.py), updated after each turn by the same small model
+    task_tracker_enabled: bool = True
     # Semantic cache for Zigi's general FAQ answers (zigi_agent/cache.py)
     semantic_cache_enabled: bool = True
     semantic_cache_ttl_s: int = 6 * 3600

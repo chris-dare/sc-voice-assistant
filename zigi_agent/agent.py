@@ -49,6 +49,7 @@ from .rules import (
     state_prompt,
     tool_result,
 )
+from .tasks import task_prompt
 
 
 @dataclass
@@ -72,9 +73,11 @@ class CallDeps:
     cache_hits: int = 0
     answer_known: bool = False  # ZIGI's answer to this is already in the conversation (a repeat was refused)
     last_reply: str = ""  # what we said to the caller last turn (for read-back-then-yes consent)
+    task: dict[str, Any] | None = None  # structured record of a known use case (tasks.py), carried between turns
     refused: list[str] = field(default_factory=list)  # their reasons, for evals and debugging
     refusals: int = 0  # guardrail refusals this turn; three or more and the model is told to stop and explain
     reader: Any = None  # reader.ZigiReader, when enabled
+    tracker: Any = None  # tasks.TaskTracker, when enabled
     zigi_ms: float = 0.0
     used_zigi: bool = False
     zigi_seen: set[str] = field(default_factory=set)
@@ -296,6 +299,13 @@ async def remember(ctx: RunContext[CallDeps], key: str, value: str) -> str:
     return f"Saved {key}."
 
 
+task_state: Capability[CallDeps] = Capability(
+    id="task",
+    description="The structured record of the caller's current task (bundle purchase, fibre check, PUK...).",
+    instructions=lambda ctx: task_prompt(ctx.deps.task),
+)
+
+
 zigi_tools: Capability[CallDeps] = Capability(
     id="zigi",
     description="Ask ZIGI, MTN's chatbot: products, prices, codes, the caller's account and transactions.",
@@ -377,6 +387,14 @@ def _caller_chose(deps: CallDeps, pick: dict[str, Any]) -> bool:
     said = pick_option(deps.zigi.options, deps.user_said)
     if said is not None:
         return key(said) == key(pick)
+    # A choice the caller made earlier in the call, kept in the task record (tasks.py fills it only from their
+    # words or a yes to an offer). ZIGI's final yes/no still needs the caller's own yes.
+    task = deps.task or {}
+    for slot in (task.get("bundle"), {"self": "myself", "someone_else": "someone else"}.get(str(task.get("recipient")))):
+        if slot:
+            chosen = pick_option(deps.zigi.options, str(slot))
+            if chosen is not None and key(chosen) == key(pick):
+                return True
     if not is_affirmative(deps.user_said):
         return False
     menu = deps.zigi.text()
@@ -535,6 +553,7 @@ def model_settings(settings: AgentSettings) -> OpenRouterModelSettings:
 def build_agent(settings: AgentSettings, model: Model | None = None) -> Agent[CallDeps, str]:
     capabilities: list[AbstractCapability[CallDeps]] = [
         zigi_tools,
+        task_state,
         caller_memory,
         WebFetch(
             native=False,

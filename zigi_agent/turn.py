@@ -77,7 +77,7 @@ async def _drive(
     note: str = "",
 ) -> None:
     t0 = time.monotonic()
-    state: dict[str, Any] = {"said": 0, "first": None, "last_lead": "", "note": bool(note)}
+    state: dict[str, Any] = {"said": 0, "first": None, "last_lead": "", "note": bool(note), "spoken": []}
     messages = ModelMessagesTypeAdapter.validate_python(history) if history else []
     prompt: str | None = text if kind == "user" else None
     extra: list[str] = [PUSH_NOTE] if kind == "push" else []
@@ -85,6 +85,10 @@ async def _drive(
         extra.append(note[:500])
     if kind == "user":
         deps.grounding.append(text)
+    options_before = [
+        f"{o.get('send')}. {o['text']}" if o.get("send") and o["send"] != o["text"] else str(o["text"]) for o in deps.zigi.options
+    ]
+    sends_before = len(deps.sends)
     try:
         with logfire.span("agent turn {kind}", kind=kind) as span:
             for attempt in range(2):
@@ -102,6 +106,28 @@ async def _drive(
                 route = "ignored"
                 logfire.info("agent ignored speech that was not meant for it")
             span.set_attribute("route", route)
+            if route != "ignored" and deps.tracker is not None:
+                # After the reply is spoken: the caller is listening, so this costs no time they notice.
+                before = deps.task
+                await emit({"type": "tracking"})  # the gateway lets a new utterance wait rather than cancel this
+                deps.task = await deps.tracker.update(
+                    deps.task,
+                    text if kind == "user" else "",
+                    " ".join(state["spoken"]),
+                    [m.text for m in deps.zigi.messages] if deps.used_zigi or kind == "push" else [],
+                    deps.zigi.step,
+                    options_before=options_before,
+                    sent=[str(x.get("text", "")) for x in deps.sends[sends_before:]],
+                    memory=deps.memory,
+                )
+                if (before or {}).get("status") != (deps.task or {}).get("status") or (before or {}).get("kind") != (deps.task or {}).get(
+                    "kind"
+                ):
+                    logfire.info(
+                        "task {kind} {status}",
+                        kind=(deps.task or before or {}).get("kind"),
+                        status=(deps.task or {}).get("status", "cleared"),
+                    )
             await emit(
                 {
                     "type": "done",
@@ -116,6 +142,7 @@ async def _drive(
                     "zigi_ms": round(deps.zigi_ms * 1000),
                     "refusals": deps.refusals,
                     "refused": deps.refused,
+                    "task": deps.task,
                     "model": getattr(result.response, "model_name", None),
                 }
             )
@@ -164,6 +191,8 @@ async def _stream(agent, deps, prompt, messages, extra, emit, state, t0):  # noq
         if state["first"] is None:
             state["first"] = round((time.monotonic() - t0) * 1000)
         state["said"] += 1
+        if not filler:
+            state["spoken"].append(sentence)
         await emit({"type": "say", "text": sentence, **({"filler": True} if filler else {})})
 
     async def lead(text: str) -> None:

@@ -54,6 +54,18 @@ log = logging.getLogger(__name__)
 
 _HAS_WORD = re.compile(r"[A-Za-z0-9]")
 _WORDS = re.compile(r"[a-z0-9']+")
+_DIGIT_RUN = re.compile(r"\+?\d(?:[\s-]?\d){3,}")
+_DIGIT_WORD = r"(?:zero|oh|one|two|three|four|five|six|seven|eight|nine)"
+_DIGIT_WORD_RUN = re.compile(rf"\b{_DIGIT_WORD}(?:[\s,-]+{_DIGIT_WORD}){{3,}}\b", re.I)
+
+
+def redact(text: str) -> str:
+    """For LOG_CONVERSATION_TEXT: codes and phone numbers (four or more digits in a row, as numbers or words) become
+    dots, so OTPs and numbers never reach the logs; prices like "GHS 10" or "0.5" stay readable."""
+    text = _DIGIT_RUN.sub(lambda m: "•" * sum(c.isdigit() for c in m.group(0)), text)
+    return _DIGIT_WORD_RUN.sub("••••", text)
+
+
 # The agent asking the caller to repeat: a production proxy for speech-recognition errors (repair rate).
 _REPAIR = re.compile(
     r"\b(say (that|it) again|didn'?t (quite )?(catch|get|hear)|did not catch|repeat (that|it)|come again|missed (that|the)|"
@@ -618,7 +630,7 @@ class VoiceSession:
                 "answer it; the caller may be repeating themselves."
             )
         if self.cfg.log_conversation_text and kind == "user":
-            logfire.info("caller said {text}", text=turn.text, turn_id=turn.id)
+            logfire.info("caller said {text}", text=redact(turn.text), turn_id=turn.id)
         request = {
             "conversation_id": self.ctx.conversation_id,
             "sunco_user_id": self.ctx.sunco_user_id,
@@ -675,7 +687,7 @@ class VoiceSession:
             if filler:
                 turn.fillers.append(text)
             if self.cfg.log_conversation_text:
-                logfire.info("agent said {text}", text=text, turn_id=turn.id, filler=filler)
+                logfire.info("agent said {text}", text=redact(text), turn_id=turn.id, filler=filler)
             turn.filler_spoken |= filler
             await self.send({"type": "agent_text", "turn_id": turn.id, "text": text, "filler": filler})
             item_id = f"{'hold' if filler else 'agent'}-{turn.id}-{len(turn.spoken)}"

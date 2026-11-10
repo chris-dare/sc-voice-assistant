@@ -394,3 +394,12 @@ def test_a_menu_reasked_without_its_list_keeps_the_options():
     z.update([msg("Sorry, I didn't get a bundle choice. Please select the bundle by providing the corresponding number.")])
     assert z.waiting_for == "menu_choice"
     assert [o["send"] for o in z.options] == ["1", "2"]
+
+
+def test_logged_conversation_text_has_no_codes_or_numbers():
+    from app.session import redact
+
+    assert redact("the OTP is 451293") == "the OTP is ••••••"
+    assert redact("My number is 0244 123 456") == "My number is ••••••••••"
+    assert "four five" not in redact("it is four five one two nine")
+    assert redact("the 837.55MB one for GHS 0.5") == "the 837.55MB one for GHS 0.5"

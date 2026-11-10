@@ -114,6 +114,18 @@ class MockSunCo:
             bundle = _BUNDLES[flow[4:]]
             self._msg(conv, "business", {"type": "text", "text": f"Done! {bundle} has been added for you."})
             return
+        if flow == "puk":
+            digits = re.sub(r"\D", "", lowered)
+            if len(digits) == 10:
+                self._msg(
+                    conv,
+                    "business",
+                    {"type": "text", "text": f"The PUK for {digits} is 12345678. Enter it on your phone to unlock the SIM."},
+                )
+            else:
+                self._flow[conv] = "puk"
+                self._msg(conv, "business", {"type": "text", "text": "Please provide the phone number of the locked SIM, e.g. 024XXXXXXX."})
+            return
         if flow == "fibre":
             self._msg(
                 conv,
@@ -124,6 +136,10 @@ class MockSunCo:
         if flow == "confirm":
             done = "Done! 1GB has been added to your account." if lowered in {"yes", "y"} else "Okay, I've cancelled that purchase."
             self._msg(conv, "business", {"type": "text", "text": done})
+            return
+        if re.search(r"\bpuk\b", lowered):
+            self._flow[conv] = "puk"
+            self._msg(conv, "business", {"type": "text", "text": "Please provide the phone number of the locked SIM, e.g. 024XXXXXXX."})
             return
         if re.search(r"\bfib(re|er)\b", lowered):
             self._flow[conv] = "fibre"

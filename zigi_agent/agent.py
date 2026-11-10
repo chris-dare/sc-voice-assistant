@@ -38,10 +38,7 @@ from .cache import SemanticCache, not_cacheable_reason, question_cacheable
 from .config import AgentSettings
 from .persona import PERSONA
 from .rules import (
-    _QUESTION,
-    _STOP,
     ZigiState,
-    _plain,
     is_affirmative,
     links_in,
     mask_digits,
@@ -72,6 +69,8 @@ class CallDeps:
     cache: SemanticCache | None = None
     cache_hits: int = 0
     answer_known: bool = False  # ZIGI's answer to this is already in the conversation (a repeat was refused)
+    refusals: int = 0  # guardrail refusals this turn; three or more and the model is told to stop and explain
+    reader: Any = None  # reader.ZigiReader, when enabled
     zigi_ms: float = 0.0
     used_zigi: bool = False
     zigi_seen: set[str] = field(default_factory=set)
@@ -117,6 +116,11 @@ async def _after_post(deps: CallDeps, content: dict[str, Any], posted: Message, 
     deps.zigi_ms += time.monotonic() - t0
     if burst:
         deps.zigi.update(burst)
+        real = [m for m in burst if not deps.is_preamble(m.text)]
+        if deps.reader is not None and real:
+            read = await deps.reader.read(real)
+            if read is not None:
+                deps.zigi.apply_read(read)
         for m in burst:
             deps.zigi_seen.add(m.id)
             deps.grounding.append(m.text)
@@ -131,6 +135,16 @@ async def _after_post(deps: CallDeps, content: dict[str, Any], posted: Message, 
         )
     elif len(answer) < len(burst):
         result["note"] = "ZIGI also sent its standard greeting and privacy notice; it is in the chat. Don't read it out."
+    if answer and deps.zigi.repeating():
+        result["note"] = (
+            "ZIGI asked the same thing again, so it did not accept what you sent. Don't send that again. Tell the caller "
+            "plainly what ZIGI needs, in their terms, or if it keeps failing, what they can do instead."
+        )
+    result["waiting_for"] = deps.zigi.waiting_for
+    if deps.zigi.read_options:
+        result["options"] = [o["text"] for o in deps.zigi.read_options]
+    if deps.zigi.step:
+        result["step"] = deps.zigi.step
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -335,7 +349,7 @@ async def choose_option(ctx: RunContext[CallDeps], option: str, lead_in: str = "
     pick = _find_option(ctx.deps.zigi, option)
     assert pick is not None  # ZigiGuardrails checked it
     # A numbered list in Zigi's text is answered with the number; a button with its own text (as a tap would).
-    content: dict[str, Any] = {"type": "text", "text": str(pick.get("number") or pick["text"])}
+    content: dict[str, Any] = {"type": "text", "text": str(pick.get("send") or pick["text"])}
     if pick.get("payload"):
         content["payload"] = pick["payload"]
     return await _send_to_zigi(ctx, content)
@@ -345,76 +359,62 @@ def _find_option(zigi: ZigiState, option: str) -> dict[str, Any] | None:
     return pick_option(zigi.options, option)
 
 
-def _is_question(deps: CallDeps) -> bool:
-    """The caller asked something rather than picking: let it through to Zigi (seen 09 Nov: every question was
-    refused while a menu was thought to be open)."""
-    said = deps.user_said.strip()
-    return pick_option(deps.zigi.options, said) is None and len(said.split()) >= 4 and bool(_QUESTION.search(said))
-
-
 def _caller_chose(deps: CallDeps, pick: dict[str, Any]) -> bool:
     """The caller's own words this turn name this option (the agent never chooses for them)."""
     said = pick_option(deps.zigi.options, deps.user_said)
-    return said is not None and str(said.get("number") or said["text"]) == str(pick.get("number") or pick["text"])
+    return said is not None and str(said.get("send") or said["text"]) == str(pick.get("send") or pick["text"])
 
 
 # ------------------------------------------------------------------ guardrails (5.8.4)
 @dataclass
 class ZigiGuardrails(AbstractCapability[CallDeps]):
-    """Enforced in code, before any tool runs. A refusal is ModelRetry feedback: the model fixes the call."""
+    """Checks on tool calls, tiered by risk (5.8.3).
+
+    High impact (can spend money, buy, or send personal data): enforced in code and refused with feedback the model
+    acts on: consent before a yes, the caller's own choice at a purchase step, complete codes and numbers the caller
+    said, links only from Zigi. Low impact: transformed into the form Zigi expects, never refused; the model decides,
+    guided by ZIGI STATE. Repeated refusals stop the model retrying and have it tell the caller plainly.
+    """
 
     async def before_tool_execute(
         self, ctx: RunContext[CallDeps], *, call: ToolCallPart, tool_def: ToolDefinition, args: ValidatedToolArgs
     ) -> ValidatedToolArgs:
         deps = ctx.deps
         waiting = deps.zigi.waiting_for
-        if call.tool_name == "ask_zigi" and waiting == "menu_choice" and deps.zigi.options and not _is_question(deps):
-            # Seen 09 Nov: sentences sent to Zigi's numbered bundle menu were read as "no choice", six times over.
-            said = str(args.get("text") or "")
-            pick = pick_option(deps.zigi.options, said) or pick_option(deps.zigi.options, deps.user_said)
-            menu_text = deps.zigi.text().lower()
-            if pick is not None and not _caller_chose(deps, pick):
-                self._refuse_unchosen(deps, call.tool_name)
-            if pick is not None:
-                value = str(pick.get("number") or pick["text"])
-                await self._lead(deps, args)
-                return {**args, "text": value}
-            if _plain(said) in {"exit", "cancel", "stop"} and "exit" in menu_text and _STOP.search(deps.user_said):
-                await self._lead(deps, args)
-                return {**args, "text": "exit"}
-            names = " | ".join(f"{o['number']}. {o['text']}" if o.get("number") else str(o["text"]) for o in deps.zigi.options)
-            self._refuse(
-                deps,
-                call.tool_name,
-                f"ZIGI is waiting for the caller to pick one option and won't understand anything else: {names}. "
-                "If the caller has chosen, use choose_option with that option. If not, read them two or three of the "
-                "options in plain words and ask which one they'd like.",
-            )
         if call.tool_name == "ask_zigi":
-            text, refusal = shape_input(str(args.get("text") or ""), waiting, deps.user_said)
-            if refusal or text is None:
+            text = str(args.get("text") or "")
+            if waiting == "menu_choice" and deps.zigi.options:
+                # Transform: "the 10 cedis one" -> "4" (09 Nov: sentences sent to a numbered menu read as no choice).
+                pick = pick_option(deps.zigi.options, text) or pick_option(deps.zigi.options, deps.user_said)
+                if pick is not None:
+                    if deps.zigi.commits and not _caller_chose(deps, pick):
+                        self._refuse_unchosen(deps, call.tool_name)
+                    await self._lead(deps, args)
+                    return {**args, "text": str(pick.get("send") or pick["text"])}
+            sent, refusal = shape_input(text, waiting, deps.user_said, deps.grounding)
+            if refusal or sent is None:
                 self._refuse(deps, call.tool_name, refusal or "Nothing to send.")
-            if _sent_recently(deps, text or ""):
+            if waiting != "none" and _sent_recently(deps, sent or ""):
+                # An answer to a step sent twice can act twice (an OTP or a "yes"); a repeated question cannot.
                 deps.answer_known = True
                 self._refuse(
                     deps,
                     call.tool_name,
-                    "You sent exactly this to ZIGI moments ago, and its reply is in ZIGI STATE and the conversation. "
-                    "Use that reply, or ask the caller what they need next. Don't send it again.",
+                    "You sent exactly this to ZIGI moments ago; its reply is in ZIGI STATE. Use it, or ask the caller.",
                 )
             if waiting in {"otp", "phone_number"}:
-                logfire.info("agent sends {waiting} {masked}", waiting=waiting, masked=mask_digits(text or ""))
+                logfire.info("agent sends {waiting} {masked}", waiting=waiting, masked=mask_digits(sent or ""))
             await self._lead(deps, args)
-            return {**args, "text": text}
+            return {**args, "text": sent}
         if call.tool_name == "choose_option":
             pick = _find_option(deps.zigi, str(args.get("option") or ""))
             if pick is None:
                 names = ", ".join(str(a["text"]) for a in deps.zigi.options) or "none"
                 self._refuse(deps, call.tool_name, f"That is not one of ZIGI's options. The options are: {names}.")
-            elif waiting == "menu_choice" and not _caller_chose(deps, pick):
-                self._refuse_unchosen(deps, call.tool_name)
             elif waiting == "confirmation" and is_affirmative(str(pick["text"])) and not is_affirmative(deps.user_said):
-                self._refuse(deps, call.tool_name, "The caller has not said yes in this turn. Ask them and wait for their answer.")
+                self._refuse(deps, call.tool_name, "The caller hasn't said yes. Ask them and wait for their answer.")
+            elif deps.zigi.commits and not _caller_chose(deps, pick):
+                self._refuse_unchosen(deps, call.tool_name)
             await self._lead(deps, args)
             return args
         if call.tool_name == "web_fetch":
@@ -434,13 +434,9 @@ class ZigiGuardrails(AbstractCapability[CallDeps]):
         return result
 
     def _refuse_unchosen(self, deps: CallDeps, tool: str) -> None:
-        # Seen 09 Nov in a test: the agent answered "Who is this purchase for?" with "Myself" on its own.
+        # 09 Nov: the agent answered "Who is this purchase for?" with "Myself" on its own.
         names = " | ".join(str(o["text"]) for o in deps.zigi.options)
-        self._refuse(
-            deps,
-            tool,
-            f"The caller hasn't chosen that. Never pick for them. Ask them, briefly and naturally, which they want: {names}.",
-        )
+        self._refuse(deps, tool, f"This step commits the caller and they haven't chosen. Ask them which they want: {names}.")
 
     @staticmethod
     async def _lead(deps: CallDeps, args: ValidatedToolArgs) -> None:
@@ -450,7 +446,15 @@ class ZigiGuardrails(AbstractCapability[CallDeps]):
     @staticmethod
     def _refuse(deps: CallDeps, tool: str, reason: str) -> None:
         deps.grounding.append(reason)  # numbers in our own feedback may be repeated to the caller
-        logfire.info("guardrail refused {tool}", tool=tool)
+        deps.refusals += 1
+        logfire.info("guardrail refused {tool}: {reason}", tool=tool, reason=reason[:120])
+        if deps.refusals >= 3:
+            # Escalate instead of looping (09 Nov: about 15 refusals in three minutes).
+            reason += (
+                " This has been stopped several times now: stop trying tools. Tell the caller plainly what you need "
+                "from them, or that this can't be finished here and what they can do instead (for example the USSD "
+                "code or the MyMTN app ZIGI mentioned)."
+            )
         raise ModelRetry(reason)
 
 

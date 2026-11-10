@@ -36,24 +36,34 @@ _EXAMPLE = re.compile(r"^(for example|e\.g\.|eg|example|format)\b|X{3,}", re.I)
 
 @dataclass
 class ZigiState:
-    """What Zigi said last and what it is waiting for. Rebuilt from each reply burst."""
+    """What Zigi said last and what it is waiting for. Rebuilt from each reply burst.
+
+    waiting_for, options, step and commits come from the Zigi reader (zigi_agent/reader.py) when it ran, else from
+    the rules below. recent keeps Zigi's last few prompts, to notice when it keeps asking the same thing.
+    """
 
     messages: list[Message] = field(default_factory=list)
     waiting_for: str = "none"
+    read_options: list[dict[str, Any]] | None = None
+    step: str = ""
+    commits: bool = False
+    recent: list[str] = field(default_factory=list)
 
     @property
     def options(self) -> list[dict[str, Any]]:
-        """Zigi's choices: its buttons, or else a numbered list in its text ("4. 837.55MB @ GHS 10"), where the
-        choice is made by sending the number (seen 09 Nov: the bundle menu has no buttons)."""
+        """Zigi's choices as {"text", "send"}: what the reader found, else its buttons, else a numbered list in its
+        text, chosen by sending the number (09 Nov: the bundle menu has no buttons)."""
+        if self.read_options is not None:
+            return self.read_options
         for m in reversed(self.messages):
             acts = [a for a in (m.content.get("actions") or []) if a.get("type") in {"reply", "postback"} and a.get("text")]
             if acts:
-                return acts
+                return [{**a, "send": a["text"]} for a in acts]
         if self.waiting_for == "menu_choice":
             for m in reversed(self.messages):
                 items = numbered_options(m.text)
                 if len(items) >= 2:
-                    return [{"text": label, "number": num} for num, label in items]
+                    return [{"text": label, "send": num} for num, label in items]
         return []
 
     def update(self, burst: list[Message]) -> None:
@@ -61,9 +71,43 @@ class ZigiState:
             return
         self.messages = burst[-6:]
         self.waiting_for = classify_waiting(self.messages)
+        self.read_options, self.step = None, ""
+        self.commits = self.waiting_for in {"otp", "phone_number", "amount", "confirmation"}
+        last = _norm_text(self.messages[-1].text)
+        if last:
+            self.recent = [*self.recent[-4:], last]
+
+    def apply_read(self, read: Any) -> None:
+        """Use the reader's judgement (a reader.ZigiRead)."""
+        self.waiting_for = read.waiting_for
+        self.step = read.step
+        # Conservative: the model under-calls this (09 Nov: a bundle menu read as not committing), and it gates the
+        # hard checks, so any sign of a purchase, payment or personal data counts.
+        self.commits = (
+            bool(read.commits_customer)
+            or read.waiting_for in {"otp", "phone_number", "amount", "confirmation"}
+            or bool(_COMMITS.search(f"{read.step} {self.text()}"))
+        )
+        buttons = {str(a.get("text")): a for m in self.messages for a in (m.content.get("actions") or []) if a.get("text")}
+        self.read_options = (
+            [{**buttons.get(o.label, {}), "text": o.label, "send": o.send} for o in read.options]
+            if read.waiting_for == "menu_choice" and read.options
+            else None
+        )
+
+    def repeating(self) -> bool:
+        """Zigi just asked the same thing again: it didn't take what we sent (09 Nov: the bundle menu, six times)."""
+        return len(self.recent) >= 2 and self.recent[-1] in self.recent[:-1]
 
     def text(self) -> str:
         return "\n".join(m.text for m in self.messages if m.text)
+
+
+_COMMITS = re.compile(r"\b(buy|purchase|pay|payment|transfer|send money|subscribe|recipient|debit|withdraw|loan)", re.I)
+
+
+def _norm_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()[:300]
 
 
 def _ask(text: str) -> str:
@@ -199,77 +243,46 @@ def ungrounded_numbers(sentence: str, sources: list[str]) -> list[str]:
     return missing
 
 
-def shape_input(text: str, waiting_for: str, user_said: str) -> tuple[str | None, str | None]:
-    """Turn the agent's tool input into what Zigi expects. Returns (text to send, refusal reason)."""
+def shape_input(text: str, waiting_for: str, user_said: str, grounding: list[str] | None = None) -> tuple[str | None, str | None]:
+    """Put the agent's message to Zigi in the form Zigi expects. Returns (text to send, refusal reason).
+
+    Design (5.8.3, after 09 Nov): this transforms; it refuses only what is high-impact. A code or phone number must be
+    complete and must be one the caller said (it can spend money or reach someone else); "yes" to a confirmation must
+    come from the caller. Everything else goes through: the model judges what to send, and ZIGI STATE tells it where
+    Zigi stands. Earlier rules that refused yes/no, questions or "cancel" mid-step blocked real requests.
+    """
     text = text.strip()
     if not text:
-        return None, "Empty message. Ask the user what they need."
-    what = "one-time code" if waiting_for == "otp" else "phone number"
-    if waiting_for not in {"otp", "phone_number", "amount"} and re.fullmatch(r"[\d\s.,-]{4,}", text):
-        # Seen 09 Nov: an OTP the caller repeated after the check had finished went to Zigi three more times.
-        return (
-            None,
-            "ZIGI is not asking for a code or number right now, so don't send one. If the caller repeated an old code, "
-            "tell them that step is already done and ask what they'd like next.",
-        )
-    if waiting_for in {"otp", "phone_number"} and not spoken_digits(text) and not spoken_digits(user_said):
-        if is_affirmative(text) or _NEGATIVE.fullmatch(_plain(text)):
-            return None, f"ZIGI is waiting for the caller's {what}, not a yes or no. Ask the caller for their {what}."
-        if _META.search(text):
-            return (
-                None,
-                f"Don't ask ZIGI about its own steps. ZIGI is waiting for the caller's {what}: ask the caller for it, "
-                "or answer them yourself from the conversation.",
-            )
-        if _plain(text) in _STOP_WORDS or _STOP.search(text):
-            # Probed 09 Nov: mid-login, Zigi ignores "cancel" (no reply for 46 s) and answers "menu" with the same
-            # prompt. There is no way out of the step, so never send these.
-            return (
-                None,
-                f"That step can't be cancelled part way, so don't send that. Tell the caller kindly that you need their "
-                f"{what} to finish this check before you can look anything else up, and that it's fine to give it "
-                "whenever they're ready.",
-            )
-        # Seen 09 Nov: an e-shop question sent mid-login cost 46 s and Zigi only asked for the number again.
-        return (
-            None,
-            f"ZIGI is in the middle of a step and is waiting for the caller's {what}; it won't answer anything else "
-            "until that's done or cancelled. Tell the caller you'll help with their question right after, and ask "
-            f"for their {what}. If they want to stop, send cancel.",
-        )
-    if waiting_for == "otp":
+        return None, "Empty message. Ask the caller what they need."
+    said_digits = {spoken_digits(t) for t in [user_said, *(grounding or [])] if spoken_digits(t)}
+    if waiting_for in {"otp", "phone_number"}:
         digits = spoken_digits(text) or spoken_digits(user_said)
-        if 4 <= len(digits) <= 8:
-            return digits, None
-        return (
-            None,
-            "Zigi is waiting for a four to eight digit code and none was found. Ask the user to say the code again, digit by digit.",
-        )
-    if waiting_for == "phone_number":
-        digits = spoken_digits(text) or spoken_digits(user_said)
-        if digits.startswith("2330") and len(digits) == 13:
-            digits = digits[3:]
-        elif digits.startswith("233") and len(digits) == 12:
-            digits = "0" + digits[3:]
-        if len(digits) == 10 and digits.startswith("0"):
-            return digits, None
-        if len(digits) == 9:
-            return "0" + digits, None
-        return (
-            None,
-            f"Zigi is waiting for a ten digit phone number starting with zero, and I heard {len(digits)} digits. "
-            "If they stopped part way, ask for the rest of it; otherwise ask them to say it again slowly.",
-        )
+        if not digits:
+            return text, None  # something else; the model decided Zigi should have it
+        if waiting_for == "otp":
+            if not 4 <= len(digits) <= 8:
+                return None, f"A one-time code has four to eight digits and I have {len(digits)}. Ask the caller to say it again."
+        else:
+            if digits.startswith("2330") and len(digits) == 13:
+                digits = digits[3:]
+            elif digits.startswith("233") and len(digits) == 12:
+                digits = "0" + digits[3:]
+            elif len(digits) == 9:
+                digits = "0" + digits
+            if not (len(digits) == 10 and digits.startswith("0")):
+                return (
+                    None,
+                    f"A phone number has ten digits starting with zero and I have {len(digits)}. If they stopped part "
+                    "way, ask for the rest; otherwise ask them to say it again slowly.",
+                )
+        if not any(digits in d or d.endswith(digits[1:]) for d in said_digits):
+            return None, "Only send a code or number the caller actually said. Ask them for it."
+        return digits, None
     if waiting_for == "amount":
         m = re.search(r"\d+(?:\.\d{1,2})?", text.replace(",", ""))
-        if m:
-            return m.group(0), None
-        return text, None
+        return (m.group(0) if m else text), None
     if waiting_for == "confirmation" and is_affirmative(text) and not is_affirmative(user_said):
-        return (
-            None,
-            "Zigi is asking the user to confirm. The user has not said yes in this turn. Read Zigi's question to the user and wait for their answer.",
-        )
+        return None, "ZIGI is asking the caller to confirm, and they haven't said yes. Ask them and wait for their answer."
     return text, None
 
 
@@ -348,9 +361,13 @@ def state_prompt(zigi: ZigiState) -> str:
     if zigi.messages:
         lines.append("ZIGI's last reply:")
         lines.extend(f"- {m.text}" for m in zigi.messages if m.text)
-    opts = [f"{o['number']}. {o['text']}" if o.get("number") else str(o["text"]) for o in zigi.options]
+    if zigi.step:
+        lines.append(f"step: {zigi.step}" + (" (answering commits the caller: purchase, payment or personal data)" if zigi.commits else ""))
+    opts = [f"{o['send']}. {o['text']}" if o.get("send") and o["send"] != o["text"] else str(o["text"]) for o in zigi.options]
     if opts:
         lines.append("Options (pick one with choose_option): " + " | ".join(opts))
+    if zigi.repeating():
+        lines.append("ZIGI has asked this before: it did not accept what was sent.")
     if not zigi.messages:
         lines.append("ZIGI has not said anything yet in this call.")
     return "\n".join(lines)
@@ -374,14 +391,26 @@ def tool_result(burst: list[Message], waiting_for: str, timed_out: bool) -> str:
 
 
 def state_to_dict(zigi: ZigiState) -> dict[str, Any]:
-    return {"messages": [m.to_dict() for m in zigi.messages], "waiting_for": zigi.waiting_for}
+    return {
+        "messages": [m.to_dict() for m in zigi.messages],
+        "waiting_for": zigi.waiting_for,
+        "read_options": zigi.read_options,
+        "step": zigi.step,
+        "commits": zigi.commits,
+        "recent": zigi.recent,
+    }
 
 
 def state_from_dict(data: dict[str, Any] | None) -> ZigiState:
     if not data:
         return ZigiState()
     return ZigiState(
-        messages=[Message.from_dict(m) for m in data.get("messages") or []], waiting_for=str(data.get("waiting_for") or "none")
+        messages=[Message.from_dict(m) for m in data.get("messages") or []],
+        waiting_for=str(data.get("waiting_for") or "none"),
+        read_options=data.get("read_options"),
+        step=str(data.get("step") or ""),
+        commits=bool(data.get("commits")),
+        recent=list(data.get("recent") or []),
     )
 
 
@@ -449,7 +478,7 @@ def pick_option(options: list[dict[str, Any]], said: str) -> dict[str, Any] | No
     words = [w for w in re.findall(r"[a-z0-9]+", said.lower()) if w not in {"option", "number", "the", "please", "go", "with"}]
     if words and all(w.isdigit() or w in _STRICT_DIGIT_WORDS for w in words) and len(words) <= 2:
         num = "".join(w if w.isdigit() else _STRICT_DIGIT_WORDS[w] for w in words)
-        hit = next((o for o in options if str(o.get("number", "")) == num), None)
+        hit = next((o for o in options if str(o.get("send", "")) == num), None)
         if hit:
             return hit
     want = _norm_choice(said)

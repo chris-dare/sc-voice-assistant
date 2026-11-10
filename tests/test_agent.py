@@ -43,21 +43,24 @@ def test_spoken_digits(said, digits):
     assert spoken_digits(said) == digits
 
 
-def test_otp_is_reduced_to_digits_or_refused():
-    assert shape_input("my OTP is four five one two nine", "otp", "") == ("45129", None)
+def test_codes_and_numbers_are_reduced_to_digits_and_must_be_complete():
+    """High impact: a code or number can spend money or reach someone else, so it must be complete and the caller's."""
+    said = "my OTP is four five one two nine"
+    assert shape_input(said, "otp", said) == ("45129", None)
     sent, refusal = shape_input("it's one two", "otp", "it's one two")
-    assert sent is None and "digit" in refusal
-    # No number at all: the user changed the subject, so it goes to Zigi as said.
-    # Mid-step, anything else is answered by the agent itself (Zigi would only ask for the code again)...
-    sent, refusal = shape_input("I don't have it", "otp", "I don't have it")
-    assert sent is None and "cancel" in refusal
-    # Zigi can't leave a step (probed 09 Nov), so "cancel" is never sent mid-step either.
-    assert shape_input("cancel", "otp", "cancel")[0] is None
+    assert sent is None and "digits" in refusal
+    # A code the caller never said is refused, whatever the model wrote.
+    sent, refusal = shape_input("45129", "otp", "I don't have it yet")
+    assert sent is None and "caller actually said" in refusal
+    for said in ["233 24 123 4567", "zero two four one two three four five six seven"]:
+        assert shape_input(said, "phone_number", said)[0] == "0241234567"
 
 
-def test_phone_number_is_normalised():
-    assert shape_input("233 24 123 4567", "phone_number", "")[0] == "0241234567"
-    assert shape_input("zero two four one two three four five six seven", "phone_number", "")[0] == "0241234567"
+def test_low_impact_messages_mid_step_go_through():
+    """09 Nov (design change): refusing these blocked real requests. The model decides; Zigi's state guides it."""
+    for text in ["I don't have it", "cancel", "Yes", "Could you explain why it was rejected?", "What can I buy on the e-shop?"]:
+        assert shape_input(text, "otp", text) == (text, None), text
+    assert shape_input("606461", "none", "606461") == ("606461", None)
 
 
 def test_agent_cannot_confirm_for_the_user():
@@ -228,20 +231,13 @@ def test_issues_from_the_09_nov_call():
     """Each line is something that went wrong on the 09 Nov fibre call."""
     from zigi_agent.rules import _ask
 
-    # Zigi's request ended with a format line, so "waiting for a phone number" was missed.
+    # Zigi's request ended with a format line, so "waiting for a phone number" was missed (rules fallback).
     ask = _ask("Please enter your phone number in the format:\n024XXXXXXX or 23324XXXXXX")
     assert "phone number" in ask
     assert classify_waiting([msg("Please enter your phone number in the format:\n024XXXXXXX or 23324XXXXXX")]) == "phone_number"
-    # Half a number, a "Yes", and "why was it rejected?" all reached Zigi while it waited for the number.
+    # Half a number reached Zigi.
     assert shape_input("026-226-0-", "phone_number", "026 226 0")[0] is None
-    assert shape_input("Yes", "phone_number", "yes")[0] is None
-    assert shape_input("Could you explain why the checker rejected my number?", "phone_number", "why")[0] is None
-    # After the check had finished, an old OTP was sent three more times.
-    assert shape_input("606461", "none", "606461")[0] is None
     assert shape_input("2", "menu_choice", "2") == ("2", None)
-    # The agent cancelled the check on its own when the caller only asked about something else.
-    assert shape_input("cancel", "phone_number", "What can I buy on the MTN e-shop?")[0] is None
-    assert shape_input("cancel", "phone_number", "forget it, never mind")[0] is None
 
 
 def test_a_code_said_in_two_parts_reaches_zigi_once_whole():
@@ -283,7 +279,7 @@ def test_zigis_numbered_bundle_menu_is_answered_with_a_number():
     z = ZigiState()
     z.update([menu, ask])
     assert z.waiting_for == "menu_choice"
-    assert [o["number"] for o in z.options] == ["1", "2", "3", "4", "7"]
+    assert [o["send"] for o in z.options] == ["1", "2", "3", "4", "7"]
     for said, number in [
         ("4", "4"),
         ("four", "4"),
@@ -291,7 +287,7 @@ def test_zigis_numbered_bundle_menu_is_answered_with_a_number():
         ("I want the 837.55MB bundle for GHS 10", "4"),
         ("Flexi", "7"),
     ]:
-        assert pick_option(z.options, said)["number"] == number, said
+        assert pick_option(z.options, said)["send"] == number, said
     for said in ["Yes", "What are all the available data bundles?"]:
         assert pick_option(z.options, said) is None, said
 

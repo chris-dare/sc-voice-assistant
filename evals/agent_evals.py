@@ -42,6 +42,7 @@ class Heard:
     first_ms: int | None = None
     grounding: list[str] = field(default_factory=list)
     error: str | None = None
+    refusals: int = 0  # guardrail refusals over the whole call: the over-blocking measure
 
 
 @dataclass
@@ -64,6 +65,7 @@ async def run_call(call: Call) -> Heard:
     grounding: list[str] = []
     memory: dict[str, str] = {}
     heard = Heard()
+    refusals = 0
     for i, text in enumerate(call.utterances):
         last = i == len(call.utterances) - 1
         heard = Heard() if last else heard
@@ -83,8 +85,10 @@ async def run_call(call: Call) -> Heard:
                 hist, state, grounding, memory = ev["history"], ev["zigi_state"], ev["grounding"], ev["memory"]
                 heard.route = ev["route"]
                 heard.grounding = grounding
+                refusals += int(ev.get("refusals") or 0)
             elif ev["type"] == "error":
                 heard.error = ev.get("text")
+    heard.refusals = refusals
     return heard
 
 
@@ -151,6 +155,15 @@ class SoundsRight(Evaluator[Call, Heard, Expect]):
 
 
 @dataclass
+class NotOverBlocked(Evaluator[Call, Heard, Expect]):
+    """Guardrails should rarely need to refuse: each refusal is a wasted model round trip, and many mean the rules
+    are fighting the model (09 Nov: about 15 in three minutes). At most one per call."""
+
+    def evaluate(self, ctx: EvaluatorContext[Call, Heard, Expect]) -> dict[str, float | bool]:
+        return {"refusals": float(ctx.output.refusals), "at_most_one_refusal": ctx.output.refusals <= 1}
+
+
+@dataclass
 class FastStart(Evaluator[Call, Heard, Expect]):
     def evaluate(self, ctx: EvaluatorContext[Call, Heard, Expect]) -> dict[str, float | bool]:
         first = ctx.output.first_ms
@@ -202,6 +215,22 @@ dataset = Dataset[Call, Heard, Expect](
             inputs=Call(["How do I buy a Just4U offer?", "Okay. And how does roaming work?"]),
             metadata=Expect(route="zigi", mentions=["abroad", "135", "roam"]),
         ),
+        # Generalisation: situations no rule was written for. The agent should cope without fighting the guardrails.
+        Case(
+            name="question_in_the_middle_of_a_step",
+            inputs=Call([BUY, "wait, how much does it cost again?"]),
+            metadata=Expect(sent=[], mentions=["5", "cedi"]),
+        ),
+        Case(
+            name="change_of_mind_mid_step",
+            inputs=Call([BUY, "actually forget the bundle. How does roaming work?"]),
+            metadata=Expect(mentions=["roam", "abroad", "135", "code", "otp", "finish", "first"]),
+        ),
+        Case(
+            name="unseen_flow_puk",
+            inputs=Call(["I need my PUK, my SIM is locked", "it's 0244123456"]),
+            metadata=Expect(route="zigi", sent=["0244123456"], mentions=["puk", "1234"]),
+        ),
         Case(name="purchase_asks_otp", inputs=Call([BUY]), metadata=Expect(route="zigi", mentions=["otp", "code"])),
         Case(
             # 09 Nov: sentences sent to Zigi's numbered bundle menu were read as "no choice", six times over.
@@ -225,7 +254,7 @@ dataset = Dataset[Call, Heard, Expect](
             metadata=Expect(route="zigi", sent=["yes"], mentions=["done", "added", "1gb"]),
         ),
     ],
-    evaluators=[RightRoute(), ZigiGotExactInput(), OnTopic(), SoundsRight(), FastStart()],
+    evaluators=[RightRoute(), ZigiGotExactInput(), OnTopic(), SoundsRight(), NotOverBlocked(), FastStart()],
 )
 
 

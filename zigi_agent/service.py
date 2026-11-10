@@ -67,6 +67,13 @@ class AgentEngine:
                 )
         self.provider = provider
         self.agent = build_agent(settings, mock_model() if settings.mock_providers else None)
+        self.reader = None
+        if settings.zigi_reader_enabled and not settings.mock_providers and settings.openrouter_api_key:
+            from .agent import build_model, model_settings
+            from .reader import ZigiReader
+
+            reader_settings = {**model_settings(settings), "max_tokens": 400}
+            self.reader = ZigiReader(build_model(settings, settings.zigi_reader_model), settings.zigi_reader_timeout_s, reader_settings)
         self.skip = [re.compile(p, re.IGNORECASE) for p in settings.speech_skip_patterns]
         self.preamble = [re.compile(p, re.IGNORECASE) for p in settings.zigi_preamble_patterns]
         self.bus = bus if bus is not None else (RedisBus(settings.redis_url) if settings.redis_url else None)
@@ -102,6 +109,7 @@ class AgentEngine:
             preamble=self.preamble,
             bus=self.bus,
             cache=self.cache,
+            reader=self.reader,
             emit=_noop,
         )
         async for event in run_turn(self.agent, deps, kind=req.kind, text=req.text, history=req.history, note=req.note):

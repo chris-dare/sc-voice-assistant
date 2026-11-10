@@ -45,6 +45,10 @@ class AgentSettings(BaseSettings):
     auth_secret: str = ""
     # Shared with the gateway: Zigi's messages arrive on its bus, so the agent need not poll SunCo.
     redis_url: str | None = None
+    # A small model reads each Zigi reply (what it waits for, its options, the stakes); rules are the fallback
+    zigi_reader_enabled: bool = True
+    zigi_reader_model: str = "openai/gpt-6-luna"
+    zigi_reader_timeout_s: float = 4.0
     # Semantic cache for Zigi's general FAQ answers (zigi_agent/cache.py)
     semantic_cache_enabled: bool = True
     semantic_cache_ttl_s: int = 6 * 3600

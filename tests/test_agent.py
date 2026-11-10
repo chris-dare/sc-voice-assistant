@@ -314,3 +314,52 @@ def test_echo_of_the_assistant_is_dropped():
     assert s._is_echo("What else can I help with?")
     assert not s._is_echo("How do I buy airtime?")
     assert not s._is_echo("yes")
+
+
+def test_choices_said_the_way_people_say_them():
+    """10 Nov: the caller wanted the 50-pesewa Just4U pack; "50 pesos", "the first one" and "number two" didn't map."""
+    from zigi_agent.rules import options_named, pick_option
+
+    menu = [
+        {"text": "39.3MB 1 day pack @ GHc0.5", "send": "1"},
+        {"text": "52MB daily pack @ GHc1", "send": "2"},
+        {"text": "86.9MB daily pack @ GHc1.50", "send": "3"},
+    ]
+    for said, send in [("the 50 pesewas one", "1"), ("50 pesos", "1"), ("the first one", "1"), ("number two", "2"), ("the last one", "3")]:
+        assert pick_option(menu, said)["send"] == send, said
+    assert pick_option(menu, "You want to buy two bundles for me") is None  # a quantity, not a choice
+    offer = 'The Just4U bundle that costs 50 pesos is: "39.3MB 1 day pack @ GHc0.5". Would you like to purchase this bundle?'
+    assert [o["send"] for o in options_named(menu, offer)] == ["1"]
+
+
+def test_yes_after_a_single_offer_counts_as_choosing_it():
+    """Read-back then yes: the standard confirm-before-commit pattern."""
+    from zigi_agent.agent import CallDeps, _caller_chose
+    from zigi_agent.config import AgentSettings
+    from zigi_agent.rules import ZigiState
+
+    menu = msg("Available Just4U bundles:\n\n1. 39.3MB 1 day pack @ GHc0.5\n2. 52MB daily pack @ GHc1\n3. 86.9MB daily pack @ GHc1.50")
+    ask = msg('Please select the bundle you\'d like to purchase by providing the corresponding number (e.g., "1" or "2").')
+    z = ZigiState()
+    z.update([menu, ask])
+    offer = 'The Just4U bundle that costs 50 pesos is: "39.3MB 1 day pack @ GHc0.5". Would you like to purchase this bundle?'
+
+    async def emit(_):
+        return None
+
+    deps = CallDeps(
+        provider=None,
+        settings=AgentSettings(_env_file=None),
+        conversation_id="c",
+        sunco_user_id="u",
+        user_said="Yes",
+        zigi=z,
+        grounding=[offer, menu.text, ask.text],
+        skip=[],
+        preamble=[],
+        emit=emit,
+    )
+    first, second = z.options[0], z.options[1]
+    assert _caller_chose(deps, first) and not _caller_chose(deps, second)
+    deps.user_said = "hmm, let me think"
+    assert not _caller_chose(deps, first)

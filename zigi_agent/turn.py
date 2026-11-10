@@ -115,6 +115,7 @@ async def _drive(
                     "llm_first_ms": state["first"],
                     "zigi_ms": round(deps.zigi_ms * 1000),
                     "refusals": deps.refusals,
+                    "refused": deps.refused,
                     "model": getattr(result.response, "model_name", None),
                 }
             )

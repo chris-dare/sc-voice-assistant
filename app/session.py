@@ -84,6 +84,7 @@ class Turn:
     spoken: list[str] = field(default_factory=list)
     note: str = ""  # agent: extra context for this turn (not the caller's words)
     tts_cache_hits: int = 0  # sentences spoken from the TTS cache
+    fillers: list[str] = field(default_factory=list)  # lead-ins among spoken
 
 
 @dataclass
@@ -139,6 +140,7 @@ class VoiceSession:
         self.followups: list[Turn] = []  # caller turns heard while Zigi was busy
         self.recent_spoken: list[tuple[float, str]] = []  # what we said lately, to drop echoes of it
         self.ignored_in_a_row = 0
+        self.last_reply = ""  # what the agent last said (not lead-ins), sent with the next turn
         self.superseded = False  # the caller spoke over the agent's answer to Zigi's reply; it was not said
         self.held: tuple[Turn, asyncio.Task[None]] | None = None  # a number the caller is still dictating
         self.grounding: list[str] = []  # Zigi's and the caller's words this call: what numbers may come from
@@ -607,6 +609,7 @@ class VoiceSession:
             "memory": self.memory,
             "sends": self.sends,
             "note": turn.note,
+            "last_reply": self.last_reply,
         }
         assert self.svc.agent is not None
         stream = self.svc.agent.turn(request)
@@ -646,6 +649,8 @@ class VoiceSession:
                 self.superseded = True
                 return
             turn.spoken.append(text)
+            if filler:
+                turn.fillers.append(text)
             if self.cfg.log_conversation_text:
                 logfire.info("agent said {text}", text=text, turn_id=turn.id, filler=filler)
             turn.filler_spoken |= filler
@@ -678,6 +683,9 @@ class VoiceSession:
             turn.zigi_ms = (event.get("zigi_ms") or 0) / 1000
             turn.route = event.get("route") or turn.route
             turn.done = True
+            answer = [t for t in turn.spoken if t not in turn.fillers]
+            if answer:
+                self.last_reply = " ".join(answer)
             if turn.route == "ignored":
                 # The agent judged this wasn't said to it (someone else in the room): say nothing, keep listening.
                 self.ignored_in_a_row += 1

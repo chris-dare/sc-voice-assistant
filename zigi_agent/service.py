@@ -44,6 +44,7 @@ class TurnRequest(BaseModel):
     memory: dict[str, str] = Field(default_factory=dict)
     sends: list[dict[str, Any]] = Field(default_factory=list)
     note: str = ""  # from the gateway, e.g. the caller spoke over the last reply
+    last_reply: str = ""  # what the agent said to the caller last turn
 
 
 class AgentEngine:
@@ -110,6 +111,7 @@ class AgentEngine:
             bus=self.bus,
             cache=self.cache,
             reader=self.reader,
+            last_reply=req.last_reply[:1000],
             emit=_noop,
         )
         async for event in run_turn(self.agent, deps, kind=req.kind, text=req.text, history=req.history, note=req.note):

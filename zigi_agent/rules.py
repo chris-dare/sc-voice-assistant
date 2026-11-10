@@ -481,6 +481,25 @@ def pick_option(options: list[dict[str, Any]], said: str) -> dict[str, Any] | No
         hit = next((o for o in options if str(o.get("send", "")) == num), None)
         if hit:
             return hit
+    # "the first one", "the second bundle", "the last one"
+    m = _ORDINAL.search(said)
+    if m and len(said.split()) <= 6:
+        idx = len(options) - 1 if m.group(1).lower() == "last" else _ORDINALS[m.group(1).lower()]
+        if idx < len(options):
+            return options[idx]
+    # "number two" / "option 2" inside a longer sentence
+    m = re.search(r"\b(?:number|option|no\.?)\s+(\d{1,2}|" + "|".join(_STRICT_DIGIT_WORDS) + r")\b", said.lower())
+    if m:
+        num = m.group(1) if m.group(1).isdigit() else _STRICT_DIGIT_WORDS[m.group(1)]
+        hit = next((o for o in options if str(o.get("send", "")) == num), None)
+        if hit:
+            return hit
+    # a price, however it's said: "50 pesewas" (heard as "50 pesos") is GHc0.5, "one fifty" is 1.50
+    price = spoken_price(said)
+    if price is not None:
+        matches = [o for o in options if price in option_prices(str(o["text"]))]
+        if len(matches) == 1:
+            return matches[0]
     want = _norm_choice(said)
     for o in options:
         if _norm_choice(str(o["text"])) == want:
@@ -505,3 +524,38 @@ def pick_option(options: list[dict[str, Any]], said: str) -> dict[str, Any] | No
         if best[0] >= 1 and sum(1 for sc, _ in scored if sc == best[0]) == 1:
             return best[1]
     return None
+
+
+_ORDINALS = {"first": 0, "second": 1, "third": 2, "fourth": 3, "fifth": 4, "sixth": 5, "seventh": 6, "last": -1}
+_ORDINAL = re.compile(r"\b(first|second|third|fourth|fifth|sixth|seventh|last)\b", re.I)
+_PRICE_IN_OPTION = re.compile(r"(?:gh\s?[c₵s]|ghs|cedis?)\s*@?\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:gh\s?[c₵s]|cedis?)\b", re.I)
+
+
+def option_prices(text: str) -> set[float]:
+    """Prices in cedis in an option's text: "39.3MB 1 day pack @ GHc0.5" -> {0.5}."""
+    return {round(float(a or b), 2) for a, b in _PRICE_IN_OPTION.findall(text)}
+
+
+def spoken_price(said: str) -> float | None:
+    """A price the caller said, in cedis: "50 pesewas" -> 0.5, "1 cedi 50" -> 1.5, "GHS 10" / "10 cedis" -> 10."""
+    s = said.lower()
+    m = re.search(r"(\d+)\s*(?:pesewas?|pesos?|p)\b", s)
+    if m:
+        return round(int(m.group(1)) / 100, 2)
+    m = re.search(r"(\d+)\s*(?:cedis?|gh\s?[c₵s]|ghs)\s*(?:and\s*)?(\d{1,2})\b", s)
+    if m:
+        return round(int(m.group(1)) + int(m.group(2)) / 100, 2)
+    prices = option_prices(s)
+    return next(iter(prices)) if len(prices) == 1 else None
+
+
+def options_named(options: list[dict[str, Any]], text: str) -> list[dict[str, Any]]:
+    """The options a piece of text mentions, by their own size or price ("39.3MB", "GHc0.5")."""
+    low = text.lower().replace(" ", "")
+    named = []
+    for o in options:
+        label = str(o["text"]).lower()
+        sizes = re.findall(r"\d+(?:\.\d+)?\s*(?:mb|gb)", label)
+        if any(z.replace(" ", "") in low for z in sizes) or (option_prices(label) & option_prices(text)) or label.replace(" ", "") in low:
+            named.append(o)
+    return named

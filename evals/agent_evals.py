@@ -66,13 +66,21 @@ async def run_call(call: Call) -> Heard:
     memory: dict[str, str] = {}
     heard = Heard()
     refusals = 0
+    last_reply = ""
     for i, text in enumerate(call.utterances):
         last = i == len(call.utterances) - 1
         heard = Heard() if last else heard
         t0 = time.monotonic()
         async for ev in ENGINE.turn(
             TurnRequest(
-                conversation_id=conv, sunco_user_id="u", text=text, history=hist, zigi_state=state, grounding=grounding, memory=memory
+                conversation_id=conv,
+                sunco_user_id="u",
+                text=text,
+                history=hist,
+                zigi_state=state,
+                grounding=grounding,
+                memory=memory,
+                last_reply=last_reply,
             )
         ):
             if ev["type"] == "say":
@@ -86,6 +94,7 @@ async def run_call(call: Call) -> Heard:
                 heard.route = ev["route"]
                 heard.grounding = grounding
                 refusals += int(ev.get("refusals") or 0)
+                last_reply = " ".join(heard.said) or last_reply
             elif ev["type"] == "error":
                 heard.error = ev.get("text")
     heard.refusals = refusals
@@ -230,6 +239,18 @@ dataset = Dataset[Call, Heard, Expect](
             name="unseen_flow_puk",
             inputs=Call(["I need my PUK, my SIM is locked", "it's 0244123456"]),
             metadata=Expect(route="zigi", sent=["0244123456"], mentions=["puk", "1234"]),
+        ),
+        Case(
+            # 10 Nov: a choice said as an ordinal, then "for me", must reach Zigi as "1" and "Myself".
+            name="ordinal_choice",
+            inputs=Call(["Show me the data bundles", "The first one please", "It's for me"]),
+            metadata=Expect(sent=["Myself"], mentions=["added", "done"]),
+        ),
+        Case(
+            # 10 Nov: read-back then yes. "Which is the cheapest?" -> offered one -> "Yes" is a choice.
+            name="yes_after_an_offer_is_a_choice",
+            inputs=Call(["Show me the data bundles", "Which one is the cheapest?", "Yes, that one", "For me"]),
+            metadata=Expect(sent=["Myself"], mentions=["added", "done"]),
         ),
         Case(name="purchase_asks_otp", inputs=Call([BUY]), metadata=Expect(route="zigi", mentions=["otp", "code"])),
         Case(

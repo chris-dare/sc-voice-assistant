@@ -634,16 +634,7 @@ class VoiceClient {
     // noise and voices are never transcribed. The last ~240 ms of real audio is replayed when speech starts.
     const gate = state.config.noise_gate !== false;
     if (this.speaking || !gate) {
-      // Voice focus, second stage: while the mic is open, stretches well below the caller's level (someone else
-      // talking between their words) are turned down by 12 dB, so the transcriber follows the caller (10 Nov WER
-      // test: with a voice 12 dB below, it sometimes transcribed that voice instead of a short answer).
-      if (focus && rms < this.voice * 0.35) {
-        const quiet = new Int16Array(pcm.slice(0));
-        for (let i = 0; i < quiet.length; i++) quiet[i] = quiet[i] >> 2;
-        this.ws.send(quiet.buffer);
-      } else {
-        this.ws.send(pcm);
-      }
+      this.ws.send(pcm);
     } else {
       this.gateBuf = this.gateBuf || [];
       this.gateBuf.push(pcm);

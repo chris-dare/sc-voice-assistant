@@ -133,8 +133,9 @@ def mix(clean: bytes, babble: bytes, snr_db: float = 12.0) -> bytes:
 
 
 def focus(audio: bytes) -> bytes:
-    """The app's voice focus while the mic is open (web/app.js): 20 ms frames well below the caller's level are
-    turned down by 12 dB. The caller's level is the 75th percentile of the voiced frames, as the app learns it."""
+    """A candidate second stage of voice focus, measured but not shipped: while the mic is open, 20 ms frames well
+    below the caller's level turned down by 12 dB. On 10 Nov it made no measurable difference (WER 12.0% vs 11.1%
+    with a voice 12 dB below, within run-to-run noise), so the app does not do it. Kept to re-test on real calls."""
     n = 320
     frames = [audio[i : i + 2 * n] for i in range(0, len(audio), 2 * n)]
 

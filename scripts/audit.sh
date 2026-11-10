@@ -12,5 +12,12 @@ echo "== Web client"
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 version=$(curl -fsS https://eu-assets.i.posthog.com/static/array.js | grep -oE '"1\.[0-9]+\.[0-9]+"' | head -1 | tr -d '"')
 echo "posthog-js served: ${version}"
+# The CDN can run ahead of npm for a few hours after a release (seen 10 Nov: 1.447.9 served, 1.447.8 on npm).
+# Then audit the newest published version and say so; the audit itself always runs.
+if ! npm view "posthog-js@${version}" version --prefer-online >/dev/null 2>&1; then
+  published=$(npm view posthog-js version --prefer-online)
+  echo "warning: posthog-js ${version} is not on npm yet; auditing the newest published version, ${published}"
+  version="$published"
+fi
 printf '{"name":"web-audit","private":true,"dependencies":{"posthog-js":"%s"}}' "$version" > "$tmp/package.json"
 (cd "$tmp" && npm install --package-lock-only --ignore-scripts --silent --prefer-online && npm audit --audit-level=low)

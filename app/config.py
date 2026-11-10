@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     # Telco vocabulary that helps STT spell plan and product names right.
     # Place and product names the transcriber otherwise mishears ("North Ligon", "Faba"); see zigi_agent/lexicon.py
     stt_keyterms: list[str] = Field(default_factory=lambda: list(KEYTERMS))
-    tts_voice_id: str = "JvYVKHK9a3ohjGBudnKo"  # Alex Oke: young, casual Nigerian English male (chosen 08 Nov)
+    tts_voice_id: str = "NWCYzEZIRjKG9C8z4tSK"  # Leonard: young Ghanaian male, conversational (chosen 10 Nov; was Alex Oke)
     tts_model_voice: str = "eleven_flash_v2_5"  # lowest latency, voice mode
     tts_model_readaloud: str = "eleven_multilingual_v2"  # higher quality, read-aloud
     tts_sample_rate: int = 24000  # PCM for voice mode

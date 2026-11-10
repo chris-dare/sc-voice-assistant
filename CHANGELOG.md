@@ -10,6 +10,8 @@ sc-voice-agent-eosin.vercel.app. The design is in the solution architecture docu
 ## v0.5.0 (10 Nov 2026): guardrails by risk, structured tasks, speech accuracy
 
 ### Changed
+- **Zigi's voice is now Leonard**, a young Ghanaian male voice with a conversational style (ElevenLabs), replacing
+  Alex Oke. Its first audio arrives in under a second on the call model.
 - **Guardrails by risk tier**, following current practice for agent guardrails (OpenAI's agent guide, Anthropic's
   "Building effective agents", recent work showing rigid rules over-block). High-impact actions are enforced in
   code: a yes only when the caller said yes, the caller's own choice at a purchase step, codes and phone numbers

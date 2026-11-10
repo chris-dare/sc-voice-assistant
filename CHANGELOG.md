@@ -7,6 +7,23 @@ Release notes for the SC voice assistant POC: a voice gateway and web client in 
 Deployed to Vercel: gateway and web client at sc-voice-assistant.vercel.app, agent service at
 sc-voice-agent-eosin.vercel.app. The design is in the solution architecture document (section 5).
 
+## v0.5.1 (10 Nov 2026): fixes from a tester call
+
+### Fixed
+- **Duplicate messages to Zigi** (two or three copies at once): when the caller spoke again while the agent was
+  thinking, the gateway cancelled the turn and started a new one, but on serverless the old request kept running on
+  the agent service and also reached Zigi. Each turn now has a number in the shared store; the gateway bumps it on
+  every new or cancelled turn and the agent stops a superseded turn before anything reaches Zigi.
+- **Slow replies**: gpt-6-luna kept missing its 3 s first-word deadline, so every turn paid 3 s plus a 4 s fallback.
+  Older Zigi replies in the history are now shortened (the current one stays whole in ZIGI STATE) and the deadline
+  is 4.5 s.
+- **Task tracker timeouts** held the next turn: it now runs only when there is a task or Zigi was involved.
+- **A menu Zigi re-asks without its list** kept no options; the previous menu now carries over.
+
+### Added
+- The page and its assets carry a version stamp, and every PostHog event carries `app_version`, so a session's
+  client build is known.
+
 ## v0.5.0 (10 Nov 2026): guardrails by risk, structured tasks, speech accuracy
 
 ### Changed

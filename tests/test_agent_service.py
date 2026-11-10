@@ -56,3 +56,18 @@ def test_the_same_message_is_not_sent_to_zigi_twice():
         done = events[-1]
         again = turn(c, "How does roaming work?", history=done["history"], zigi_state=done["zigi_state"], sends=done["sends"])
     assert [e for e in again if e["type"] == "zigi_posted"] == []
+
+
+def test_a_superseded_turn_never_reaches_zigi():
+    """10 Nov: the gateway cancelled a turn and started a newer one, but the old request kept running on the agent
+    service and both reached Zigi. A turn older than the call's latest turn number stops before sending."""
+    import asyncio
+
+    with service() as c:
+        store = c.app.state.engine.store
+        asyncio.run(store.set_json("turnseq:c1", 5, 60))
+        stale = turn(c, "How does roaming work?", turn_seq=4)
+        assert [e for e in stale if e["type"] == "zigi_posted"] == []
+        assert not [e for e in stale if e["type"] == "error"]
+        current = turn(c, "How does roaming work?", turn_seq=5)
+        assert [e for e in current if e["type"] == "zigi_posted"]

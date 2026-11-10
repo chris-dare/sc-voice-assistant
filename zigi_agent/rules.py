@@ -48,6 +48,7 @@ class ZigiState:
     step: str = ""
     commits: bool = False
     recent: list[str] = field(default_factory=list)
+    prev_options: list[dict[str, Any]] = field(default_factory=list)  # the last menu Zigi showed
 
     @property
     def options(self) -> list[dict[str, Any]]:
@@ -64,13 +65,18 @@ class ZigiState:
                 items = numbered_options(m.text)
                 if len(items) >= 2:
                     return [{"text": label, "send": num} for num, label in items]
+            # Zigi re-asks "select by number" without repeating its list (10 Nov): the last list still stands.
+            return self.prev_options
         return []
 
     def update(self, burst: list[Message]) -> None:
         if not burst:
             return
+        self.prev_options = self.options or self.prev_options
         self.messages = burst[-6:]
         self.waiting_for = classify_waiting(self.messages)
+        if self.waiting_for == "none" and self.prev_options and _SELECT.search(_ask(self.messages[-1].text)):
+            self.waiting_for = "menu_choice"  # re-asked without its list: the previous menu still stands
         self.read_options, self.step = None, ""
         self.commits = self.waiting_for in {"otp", "phone_number", "amount", "confirmation"}
         last = _norm_text(self.messages[-1].text)
@@ -94,6 +100,8 @@ class ZigiState:
             if read.waiting_for == "menu_choice" and read.options
             else None
         )
+        if read.waiting_for == "menu_choice" and not self.read_options and not self.options and self.prev_options:
+            self.read_options = self.prev_options
 
     def repeating(self) -> bool:
         """Zigi just asked the same thing again: it didn't take what we sent (09 Nov: the bundle menu, six times)."""
@@ -398,6 +406,7 @@ def state_to_dict(zigi: ZigiState) -> dict[str, Any]:
         "step": zigi.step,
         "commits": zigi.commits,
         "recent": zigi.recent,
+        "prev_options": zigi.prev_options,
     }
 
 
@@ -411,6 +420,7 @@ def state_from_dict(data: dict[str, Any] | None) -> ZigiState:
         step=str(data.get("step") or ""),
         commits=bool(data.get("commits")),
         recent=list(data.get("recent") or []),
+        prev_options=list(data.get("prev_options") or []),
     )
 
 

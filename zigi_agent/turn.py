@@ -30,7 +30,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.run import AgentRunResultEvent
 
-from .agent import CallDeps
+from .agent import CallDeps, Superseded
 from .lexicon import hint_note
 from .persona import PUSH_NOTE, lead_in
 from .rules import asks_about_mtn, state_to_dict, ungrounded_numbers
@@ -110,7 +110,9 @@ async def _drive(
                 route = "ignored"
                 logfire.info("agent ignored speech that was not meant for it")
             span.set_attribute("route", route)
-            if route != "ignored" and deps.tracker is not None:
+            # The task record only changes when there is one, or ZIGI was involved (10 Nov: tracking every turn,
+            # small talk included, timed out under load and held the next turn).
+            if route != "ignored" and deps.tracker is not None and (deps.task or deps.used_zigi or kind == "push"):
                 # After the reply is spoken: the caller is listening, so this costs no time they notice.
                 before = deps.task
                 await emit({"type": "tracking"})  # the gateway lets a new utterance wait rather than cancel this
@@ -150,6 +152,8 @@ async def _drive(
                     "model": getattr(result.response, "model_name", None),
                 }
             )
+    except Superseded:
+        return  # the gateway has moved on to a newer turn: nothing to say, nothing more to send
     except (ModelRequestTimeout, ModelAPIError, AgentRunError, _Ungrounded) as exc:
         logfire.warn("agent turn failed: {error}", error=type(exc).__name__)
         await emit({"type": "error", "code": "agent_failed", "text": type(exc).__name__, "said": state["said"]})

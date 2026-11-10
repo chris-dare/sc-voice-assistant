@@ -57,12 +57,14 @@ class HTTPAgentClient:
 class InProcessAgentClient:
     """Runs the agent service's engine in this process, sharing the gateway's SunCo provider."""
 
-    def __init__(self, provider: Any, mock: bool, bus: Any = None) -> None:
+    def __init__(self, provider: Any, mock: bool, bus: Any = None, store: Any = None) -> None:
         from zigi_agent.config import AgentSettings
         from zigi_agent.service import AgentEngine
 
         settings = AgentSettings(mock_providers=mock)
         self.engine = AgentEngine(settings, provider=provider, bus=bus)
+        if store is not None:
+            self.engine.store = store  # turn numbers are shared with the gateway
 
     async def turn(self, request: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         from zigi_agent.service import TurnRequest

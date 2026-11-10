@@ -36,7 +36,8 @@ export function initAnalytics(cfg) {
     session_recording: { maskAllInputs: true, maskTextSelector: "*" },
     disable_surveys: true,
   });
-  window.posthog.register(deviceProps());
+  const version = document.querySelector('meta[name="app-version"]');
+  window.posthog.register({ ...deviceProps(), app_version: version ? version.content : "unknown" });
   enabled = true;
   while (queue.length) { const [e, p] = queue.shift(); track(e, p); }
 }

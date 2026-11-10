@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import re
 import time
@@ -25,7 +26,7 @@ import logfire
 from pydantic_ai import Agent, ModelRetry, RunContext
 from pydantic_ai.capabilities import AbstractCapability, Capability, ModelFallback, ProcessHistory, ValidatedToolArgs, WebFetch
 from pydantic_ai.common_tools.web_fetch import web_fetch_tool
-from pydantic_ai.messages import ModelMessage, ModelRequest, ToolCallPart, UserPromptPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, ToolCallPart, ToolReturnPart, UserPromptPart
 from pydantic_ai.models import Model
 from pydantic_ai.models.openrouter import OpenRouterModel, OpenRouterModelSettings
 from pydantic_ai.providers.openrouter import OpenRouterProvider
@@ -78,6 +79,8 @@ class CallDeps:
     refusals: int = 0  # guardrail refusals this turn; three or more and the model is told to stop and explain
     reader: Any = None  # reader.ZigiReader, when enabled
     tracker: Any = None  # tasks.TaskTracker, when enabled
+    store: Any = None  # app.store.Store shared with the gateway (turn numbers)
+    turn_seq: int = 0  # this turn's number from the gateway; a higher one in the store means we're superseded
     zigi_ms: float = 0.0
     used_zigi: bool = False
     zigi_seen: set[str] = field(default_factory=set)
@@ -95,8 +98,28 @@ class CallDeps:
 
 
 # ------------------------------------------------------------------ Zigi as a tool
+class Superseded(Exception):
+    """The gateway has started a newer turn for this call; this one must not reach Zigi."""
+
+
+async def ensure_current(deps: CallDeps) -> None:
+    """Seen 10 Nov: the caller spoke again while the agent was thinking; the gateway cancelled the turn and started a
+    new one, but on serverless the old request kept running and both reached Zigi (two or three copies). The gateway
+    bumps the call's turn number in the shared store; an older turn stops here."""
+    if deps.store is None or not deps.turn_seq:
+        return
+    try:
+        latest = await deps.store.get_json(f"turnseq:{deps.conversation_id}")
+    except Exception:  # noqa: BLE001 - never block a send on a store hiccup
+        return
+    if latest is not None and int(latest) > deps.turn_seq:
+        logfire.info("superseded turn stopped before reaching Zigi")
+        raise Superseded()
+
+
 async def _send_to_zigi(ctx: RunContext[CallDeps], content: dict[str, Any]) -> str:
     deps = ctx.deps
+    await ensure_current(deps)
     t0 = time.monotonic()
     async with contextlib.AsyncExitStack() as stack:
         sub = None
@@ -525,15 +548,34 @@ def keep_recent(limit: int) -> Callable[[list[ModelMessage]], list[ModelMessage]
     """Keep the last `limit` messages, cut at the start of a caller turn so tool calls stay paired."""
 
     def process(messages: list[ModelMessage]) -> list[ModelMessage]:
-        if len(messages) <= limit:
-            return messages
-        for i in range(len(messages) - limit, len(messages)):
-            m = messages[i]
-            if isinstance(m, ModelRequest) and any(isinstance(p, UserPromptPart) for p in m.parts):
-                return messages[i:]
-        return messages[-1:]
+        if len(messages) > limit:
+            for i in range(len(messages) - limit, len(messages)):
+                m = messages[i]
+                if isinstance(m, ModelRequest) and any(isinstance(p, UserPromptPart) for p in m.parts):
+                    messages = messages[i:]
+                    break
+            else:
+                messages = messages[-1:]
+        return _shorten_old_tool_results(messages)
 
     return process
+
+
+def _shorten_old_tool_results(messages: list[ModelMessage], keep_last: int = 6, max_chars: int = 500) -> list[ModelMessage]:
+    """Zigi's replies older than the last few messages are cut to an excerpt: whole bundle menus and how-tos made
+    the prompt long and the model's first word slow (10 Nov: gpt-6-luna kept missing its deadline). Zigi's current
+    reply is always in ZIGI STATE in full."""
+    out = []
+    for idx, m in enumerate(messages):
+        if idx < len(messages) - keep_last and isinstance(m, ModelRequest):
+            parts = []
+            for p in m.parts:
+                if isinstance(p, ToolReturnPart) and isinstance(p.content, str) and len(p.content) > max_chars:
+                    p = dataclasses.replace(p, content=p.content[:max_chars] + " ...(older ZIGI reply, shortened)")
+                parts.append(p)
+            m = dataclasses.replace(m, parts=parts)
+        out.append(m)
+    return out
 
 
 # ------------------------------------------------------------------ the agent

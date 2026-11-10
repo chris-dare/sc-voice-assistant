@@ -146,6 +146,7 @@ class VoiceSession:
         self.followups: list[Turn] = []  # caller turns heard while Zigi was busy
         self.recent_spoken: list[tuple[float, str]] = []  # what we said lately, to drop echoes of it
         self.ignored_in_a_row = 0
+        self.turn_seq = 0  # numbers agent turns; see _bump_turn
         self.last_reply = ""  # what the agent last said (not lead-ins), sent with the next turn
         self.task: dict[str, Any] | None = None  # structured record of a known use case, from the agent service
         self.superseded = False  # the caller spoke over the agent's answer to Zigi's reply; it was not said
@@ -600,8 +601,17 @@ class VoiceSession:
         await self.set_state("thinking")
         await self._agent_turn(push, "push")
 
+    async def _bump_turn(self) -> int:
+        """A new turn number for this call, shared with the agent service so a superseded turn never reaches Zigi."""
+        self.turn_seq += 1
+        if self.svc.store is not None:
+            with contextlib.suppress(Exception):
+                await self.svc.store.set_json(f"turnseq:{self.ctx.conversation_id}", self.turn_seq, 3600)
+        return self.turn_seq
+
     async def _agent_turn(self, turn: Turn, kind: str) -> None:
         self.agent_turn, self.agent_phase = turn, "llm"
+        seq = await self._bump_turn()
         if kind == "user" and self.ignored_in_a_row >= 2 and not turn.note:
             turn.note = (
                 "You stayed silent for the last two things you heard. If this could be meant for you at all, "
@@ -622,6 +632,7 @@ class VoiceSession:
             "note": turn.note,
             "last_reply": self.last_reply,
             "task": self.task,
+            "turn_seq": seq,
         }
         assert self.svc.agent is not None
         stream = self.svc.agent.turn(request)
@@ -837,6 +848,7 @@ class VoiceSession:
             keep_agent = self.agent_phase == "zigi"  # a barge-in never abandons a request Zigi is working on
         if self.agent_task and not self.agent_task.done() and not keep_agent:
             self.agent_task.cancel()
+            await self._bump_turn()  # the cancelled turn may still be running on the agent service: stop it there
         if self.speaking and not self.speaking.done():
             self.speaking.cancel()
             await self.send({"type": "audio_stop"})

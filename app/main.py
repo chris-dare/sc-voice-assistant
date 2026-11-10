@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import hashlib
 import hmac
 import json
 import logging
@@ -25,7 +26,7 @@ from fastapi import (
     UploadFile,
     WebSocket,
 )
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -44,6 +45,18 @@ from .tts import TTSError, content_type_for
 
 log = logging.getLogger("app")
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
+
+def _asset_version() -> str:
+    """A short hash of the web client's files: changes whenever any of them does."""
+    h = hashlib.sha256()
+    for f in sorted(WEB_DIR.glob("*")) if WEB_DIR.exists() else []:
+        if f.suffix in {".js", ".css", ".html"}:
+            h.update(f.read_bytes())
+    return h.hexdigest()[:10]
+
+
+ASSET_VERSION = _asset_version()
 MAX_VOICE_NOTE_BYTES = 10 * 1024 * 1024
 _ALLOWED_FILE_TYPES = {
     "application/pdf",
@@ -394,8 +407,14 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
         app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
         @app.get("/", include_in_schema=False)
-        async def index() -> FileResponse:
-            return FileResponse(WEB_DIR / "index.html")
+        async def index() -> HTMLResponse:
+            # Stamp the client's version on the page and its assets, so a phone can't mix a new page with an old
+            # script, and analytics can say which build a session ran (10 Nov: task events missing from one call).
+            html = (WEB_DIR / "index.html").read_text()
+            html = html.replace('src="/static/app.js"', f'src="/static/app.js?v={ASSET_VERSION}"')
+            html = html.replace('href="/static/styles.css"', f'href="/static/styles.css?v={ASSET_VERSION}"')
+            html = html.replace("<head>", f'<head>\n  <meta name="app-version" content="{ASSET_VERSION}" />', 1)
+            return HTMLResponse(html, headers={"cache-control": "no-cache"})
 
     return app
 

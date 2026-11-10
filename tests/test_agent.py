@@ -363,3 +363,34 @@ def test_yes_after_a_single_offer_counts_as_choosing_it():
     assert _caller_chose(deps, first) and not _caller_chose(deps, second)
     deps.user_said = "hmm, let me think"
     assert not _caller_chose(deps, first)
+
+
+def test_old_zigi_replies_are_shortened_in_history():
+    from pydantic_ai.messages import ModelRequest, ToolReturnPart, UserPromptPart
+
+    from zigi_agent.agent import keep_recent
+
+    long = "1. 20.73MB @ GHS 0.5\n" * 100
+    msgs = [ModelRequest(parts=[UserPromptPart("hi")]), ModelRequest(parts=[ToolReturnPart("ask_zigi", long, "t1")])]
+    msgs += [ModelRequest(parts=[UserPromptPart(f"turn {i}")]) for i in range(8)]
+    out = keep_recent(24)(msgs)
+    assert len(out[1].parts[0].content) < 600 and "shortened" in out[1].parts[0].content
+    fresh = keep_recent(24)(msgs[:2])
+    assert fresh[1].parts[0].content == long  # recent replies are kept whole
+
+
+def test_a_menu_reasked_without_its_list_keeps_the_options():
+    """10 Nov: Zigi said "Please select ... by number" without the list, and no options were left to choose from."""
+    from zigi_agent.rules import ZigiState, state_from_dict, state_to_dict
+
+    z = ZigiState()
+    z.update(
+        [
+            msg("Available bundles are:\n\n1. 20.73MB @ GHS 0.5\n2. 41.46MB @ GHS 1"),
+            msg("Please select the bundle by providing the corresponding number."),
+        ]
+    )
+    z = state_from_dict(state_to_dict(z))  # carried between turns
+    z.update([msg("Sorry, I didn't get a bundle choice. Please select the bundle by providing the corresponding number.")])
+    assert z.waiting_for == "menu_choice"
+    assert [o["send"] for o in z.options] == ["1", "2"]

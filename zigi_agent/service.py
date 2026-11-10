@@ -46,6 +46,7 @@ class TurnRequest(BaseModel):
     note: str = ""  # from the gateway, e.g. the caller spoke over the last reply
     last_reply: str = ""  # what the agent said to the caller last turn
     task: dict[str, Any] | None = None  # the structured task record (tasks.py)
+    turn_seq: int = 0  # the gateway's turn number for this call (newer turns supersede older ones)
 
 
 class AgentEngine:
@@ -125,6 +126,8 @@ class AgentEngine:
             last_reply=req.last_reply[:1000],
             task=req.task,
             tracker=self.tracker,
+            store=self.store,
+            turn_seq=req.turn_seq,
             emit=_noop,
         )
         async for event in run_turn(self.agent, deps, kind=req.kind, text=req.text, history=req.history, note=req.note):

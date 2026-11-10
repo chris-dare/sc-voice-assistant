@@ -128,7 +128,7 @@ def build_services(settings: Settings) -> Services:
         if settings.agent_service_url:
             agent = HTTPAgentClient(settings.agent_service_url, settings.agent_token, http)
         else:
-            agent = InProcessAgentClient(provider, mock=settings.mock_providers, bus=bus)
+            agent = InProcessAgentClient(provider, mock=settings.mock_providers, bus=bus, store=store)
 
     watcher: Poller | NoopWatcher
     if settings.sunco_delivery == "poll" or settings.mock_providers:

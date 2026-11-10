@@ -19,7 +19,8 @@ class AgentSettings(BaseSettings):
     # Tried in order when the main model errors or gives no first token in time.
     agent_fallback_models: list[str] = Field(default_factory=lambda: ["openai/gpt-5.6-luna"])
     agent_max_tokens: int = 300
-    agent_first_event_timeout_s: float = 3.0
+    # gpt-6-luna's first token often took over 3 s with a long prompt (10 Nov), so the fallback kicked in late anyway
+    agent_first_event_timeout_s: float = 4.5
     agent_history_messages: int = 24
     # Zigi through SunCo
     zendesk_app_id: str = ""

@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import Settings  # noqa: E402
 from app.stt import ElevenLabsSTT  # noqa: E402
+from zigi_agent.lexicon import hints  # noqa: E402
 from zigi_agent.rules import spoken_digits  # noqa: E402
 
 VOICES = {
@@ -39,6 +40,7 @@ VOICES = {
     "layo_af_f": "13SMxgZX6Y3GVlBXWTE8",
     "tre_us_m": "zm9E2qHSmW6HZXdIYeV9",
 }
+LEGACY_KEYTERMS = ["data bundle", "airtime", "MoMo", "roaming", "USSD", "SIM", "PUK"]  # before 10 Nov
 BABBLE = "So I told her we'd meet at the station after work, but the traffic on that road is always terrible."
 
 _NUM = {
@@ -130,6 +132,30 @@ def mix(clean: bytes, babble: bytes, snr_db: float = 12.0) -> bytes:
     return struct.pack(f"<{len(out)}h", *out)
 
 
+def focus(audio: bytes) -> bytes:
+    """The app's voice focus while the mic is open (web/app.js): 20 ms frames well below the caller's level are
+    turned down by 12 dB. The caller's level is the 75th percentile of the voiced frames, as the app learns it."""
+    n = 320
+    frames = [audio[i : i + 2 * n] for i in range(0, len(audio), 2 * n)]
+
+    def rms(f: bytes) -> float:
+        xs = struct.unpack(f"<{len(f) // 2}h", f) if len(f) >= 2 else (0,)
+        return math.sqrt(sum(x * x for x in xs) / len(xs)) / 32768
+
+    levels = [rms(f) for f in frames]
+    voiced = sorted(v for v in levels if v > 0.012)
+    if not voiced:
+        return audio
+    voice = voiced[int(len(voiced) * 0.75)]
+    out = []
+    for f, lv in zip(frames, levels, strict=True):
+        if lv < voice * 0.35:
+            xs = struct.unpack(f"<{len(f) // 2}h", f)
+            f = struct.pack(f"<{len(xs)}h", *(x >> 2 for x in xs))
+        out.append(f)
+    return b"".join(out)
+
+
 async def tts(http: httpx.AsyncClient, key: str, voice: str, text: str, cache: Path) -> bytes:
     path = cache / f"{voice}_{abs(hash(text)) % 10**10}.pcm"
     if path.exists():
@@ -172,8 +198,8 @@ async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--voices", type=int, default=len(VOICES))
     ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--keyterms", choices=["config", "none"], default="config")
-    ap.add_argument("--conditions", default="clean,babble")
+    ap.add_argument("--keyterms", choices=["config", "legacy", "none"], default="config")
+    ap.add_argument("--conditions", default="clean,babble,focus")
     ap.add_argument("--cache", default=".wer_cache")
     ap.add_argument("--out", default="")
     args = ap.parse_args()
@@ -190,21 +216,24 @@ async def main() -> None:
     async with httpx.AsyncClient() as http:
         stt = ElevenLabsSTT(
             key, s.elevenlabs_base_url, s.stt_realtime_model, s.stt_batch_model, s.stt_language, s.stt_vad_silence_s,
-            s.stt_keyterms if args.keyterms == "config" else [], http,
+            {"config": s.stt_keyterms, "legacy": LEGACY_KEYTERMS, "none": []}[args.keyterms], http,
         )  # fmt: skip
         babble = await tts(http, key, VOICES["tre_us_m"], BABBLE, cache)
         for vname, vid in voices.items():
             for item in items:
                 clean = await tts(http, key, vid, item["text"], cache)
                 for cond in conditions:
-                    audio = clean if cond == "clean" else mix(clean, babble)
+                    audio = {"clean": clean, "babble": mix(clean, babble), "focus": focus(mix(clean, babble))}[cond]
                     t0 = time.monotonic()
                     hyp = await transcribe(stt, audio)
                     edits, n = wer(normalise(item["text"]), normalise(hyp))
                     keys = [key_ok(k, hyp) for k in item["key"]]
+                    # What reaches the agent: the transcript plus the mishearing hints it gets (zigi_agent/lexicon.py)
+                    hinted = hyp + " " + " ".join(m for _, m in hints(hyp))
+                    keys_hinted = [key_ok(k, hinted) for k in item["key"]]
                     row = {
                         "voice": vname, "condition": cond, "ref": item["text"], "hyp": hyp, "edits": edits, "words": n,
-                        "keys_ok": sum(keys), "keys": len(keys), "secs": round(time.monotonic() - t0, 1),
+                        "keys_ok": sum(keys), "keys_hinted": sum(keys_hinted), "keys": len(keys), "secs": round(time.monotonic() - t0, 1),
                     }  # fmt: skip
                     if "digits" in item:
                         row["digits_ok"] = spoken_digits(hyp) == item["digits"] or item["digits"] in re.sub(r"\D", "", hyp)
@@ -216,10 +245,14 @@ async def main() -> None:
         e = sum(r["edits"] for r in sel)
         n = sum(r["words"] for r in sel)
         k = sum(r["keys_ok"] for r in sel)
+        kh = sum(r["keys_hinted"] for r in sel)
         kn = sum(r["keys"] for r in sel)
         d = [r["digits_ok"] for r in sel if "digits_ok" in r]
         digits = 100 * sum(d) / max(1, len(d))
-        return f"WER {100 * e / max(1, n):5.1f}%   key terms {100 * k / max(1, kn):5.1f}%   digits {digits:5.1f}% ({len(sel)} clips)"
+        return (
+            f"WER {100 * e / max(1, n):5.1f}%   key terms {100 * k / max(1, kn):5.1f}% (with hints {100 * kh / max(1, kn):5.1f}%)"
+            f"   digits {digits:5.1f}% ({len(sel)} clips)"
+        )
 
     print("\n== Summary")
     for cond in conditions:

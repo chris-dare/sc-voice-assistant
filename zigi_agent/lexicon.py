@@ -41,8 +41,11 @@ KEYTERMS = (PRODUCTS + _TOP_PLACES)[:50]
 
 # Mishearings seen often enough to name outright.
 KNOWN = {
-    "ligon": "Legon", "faba": "fibre", "fiba": "fibre", "fever": "fibre", "pesos": "pesewas", "peso": "pesewas",
-    "just for you": "Just4U", "mo mo": "MoMo", "turbo net": "Turbonet", "quick loan": "Qwik Loan", "e sim": "eSIM",
+    "ligon": "Legon", "lekki": "Legon", "faba": "fibre", "fiba": "fibre", "fever": "fibre", "pesos": "pesewas",
+    "peso": "pesewas", "per sewers": "pesewas", "pesewa": "pesewas", "cities": "cedis", "cds": "cedis", "cd": "cedi",
+    "seti": "cedi", "sadie": "cedi", "just for you": "Just4U", "mo mo": "MoMo", "turbo net": "Turbonet",
+    "topernet": "Turbonet", "marshall": "Mashup", "mash up": "Mashup", "quick loan": "Qwik Loan", "e sim": "eSIM",
+    "gaine card": "Ghana Card", "ghana cut": "Ghana Card", "ashok mahal": "Ashongman",
 }  # fmt: skip
 
 _CANDIDATES = {t.lower(): t for t in [*PLACES, *PRODUCTS]}

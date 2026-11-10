@@ -9,6 +9,8 @@ from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from zigi_agent.lexicon import KEYTERMS
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -35,7 +37,8 @@ class Settings(BaseSettings):
     stt_language: str | None = "en"
     stt_vad_silence_s: float = 0.6
     # Telco vocabulary that helps STT spell plan and product names right.
-    stt_keyterms: list[str] = Field(default_factory=lambda: ["data bundle", "airtime", "MoMo", "roaming", "USSD", "SIM", "PUK"])
+    # Place and product names the transcriber otherwise mishears ("North Ligon", "Faba"); see zigi_agent/lexicon.py
+    stt_keyterms: list[str] = Field(default_factory=lambda: list(KEYTERMS))
     tts_voice_id: str = "JvYVKHK9a3ohjGBudnKo"  # Alex Oke: young, casual Nigerian English male (chosen 08 Nov)
     tts_model_voice: str = "eleven_flash_v2_5"  # lowest latency, voice mode
     tts_model_readaloud: str = "eleven_multilingual_v2"  # higher quality, read-aloud

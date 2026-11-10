@@ -54,6 +54,12 @@ log = logging.getLogger(__name__)
 
 _HAS_WORD = re.compile(r"[A-Za-z0-9]")
 _WORDS = re.compile(r"[a-z0-9']+")
+# The agent asking the caller to repeat: a production proxy for speech-recognition errors (repair rate).
+_REPAIR = re.compile(
+    r"\b(say (that|it) again|didn'?t (quite )?(catch|get|hear)|did not catch|repeat (that|it)|come again|missed (that|the)|"
+    r"one more time|say the (whole|full)|which (one|area) did you)\b",
+    re.I,
+)
 # Transcripts made only of fillers or noise words are not a turn ("Uh, uh, uh").
 _FILLER = re.compile(r"^(?:\s|[.,!?…-])*(?:(?:uh|um+|uhm|hmm+|mm+|ah+|er+|eh|oh|huh|hm)(?:\s|[.,!?…-])*)+$", re.I)
 _PREROLL_BYTES = 16000  # 0.5 s of 16 kHz PCM16 kept before speech_start (batch mode)
@@ -868,6 +874,7 @@ class VoiceSession:
             "type": "metrics",
             "turn_id": turn.id,
             "tts_cache_hits": turn.tts_cache_hits,
+            "asked_repeat": any(_REPAIR.search(t) for t in turn.spoken),
             "mode": self.mode,
             "route": turn.route,
             "stt_ms": ms(turn.t_speech_end, turn.t_final),
@@ -903,6 +910,7 @@ class VoiceSession:
             "type": "metrics",
             "turn_id": turn.id,
             "tts_cache_hits": turn.tts_cache_hits,
+            "asked_repeat": any(_REPAIR.search(t) for t in turn.spoken),
             "mode": self.mode,
             "route": turn.route,
             "stt_ms": ms(turn.t_speech_end, turn.t_final),

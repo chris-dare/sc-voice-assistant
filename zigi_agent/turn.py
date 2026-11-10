@@ -31,6 +31,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.run import AgentRunResultEvent
 
 from .agent import CallDeps
+from .lexicon import hint_note
 from .persona import PUSH_NOTE, lead_in
 from .rules import asks_about_mtn, state_to_dict, ungrounded_numbers
 
@@ -83,6 +84,9 @@ async def _drive(
     extra: list[str] = [PUSH_NOTE] if kind == "push" else []
     if note:
         extra.append(note[:500])
+    if kind == "user" and (heard := hint_note(text)):
+        extra.append(heard)  # likely mishearings of place and product names; a hint, never a rewrite
+        logfire.info("speech hints {count}", count=heard.count("is probably"))
     if kind == "user":
         deps.grounding.append(text)
     options_before = [

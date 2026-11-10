@@ -39,3 +39,4 @@ testpaths = ["tests"]
 [tool.ruff.lint.per-file-ignores]
 "tests/conftest.py" = ["E402"]  # env must be cleared before app.main is imported
 "zigi_agent/*.py" = ["E501"]  # prompt and regex text reads better unwrapped
+"scripts/*.py" = ["ASYNC240"]  # scripts read files from async main; fine outside a server
